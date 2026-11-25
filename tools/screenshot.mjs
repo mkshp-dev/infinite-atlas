@@ -1,6 +1,6 @@
 // Dev utility: drive the real app in headless Chromium, take screenshots and
 // report console errors. Uses the Playwright copy cached on this machine.
-//   node tools/screenshot.mjs
+//   node tools/screenshot.mjs [url]
 
 import { createRequire } from 'node:module';
 import { mkdirSync } from 'node:fs';
@@ -26,33 +26,40 @@ async function shot(name) {
 
 await page.goto(url, { waitUntil: 'load' });
 await page.waitForTimeout(3000);
-await shot('01-initial');
+await shot('01-descent');
 console.log('status:', await page.textContent('#status'));
 console.log('seed:', await page.inputValue('#seed'));
 console.log('position:', await page.textContent('#stat-pos'));
+console.log('altitude:', await page.textContent('#stat-alt'));
 console.log('zoom:', await page.textContent('#stat-scale'));
 console.log('fps:', await page.textContent('#stat-fps'));
 
-await page.mouse.move(760, 460);
-await page.mouse.wheel(0, -700);
-await page.waitForTimeout(1800);
-await shot('02-zoomed');
+await page.click('#view-first');
+await page.waitForTimeout(1000);
+await shot('02-canopy-cam');
 
-await page.mouse.move(950, 480);
-await page.mouse.down();
-await page.mouse.move(520, 300, { steps: 12 });
-await page.mouse.up();
-await page.waitForTimeout(1800);
-await shot('03-panned');
+await page.click('#view-third');
+await page.keyboard.down('d');
+await page.waitForTimeout(900);
+await page.keyboard.up('d');
+await page.waitForTimeout(500);
+await shot('03-steered');
 
 await page.click('#new-seed');
 await page.waitForTimeout(2200);
 await shot('04-new-seed');
 console.log('seed 2:', await page.inputValue('#seed'));
 
+await page.click('#mode-atlas');
+await page.waitForTimeout(1200);
+await page.mouse.move(760, 460);
+await page.mouse.wheel(0, -700);
+await page.waitForTimeout(1500);
+await shot('05-atlas');
+
 await page.setViewportSize({ width: 420, height: 820 });
 await page.waitForTimeout(1200);
-await shot('05-mobile');
+await shot('06-mobile');
 
 console.log('--- console ---');
 console.log(logs.join('\n') || '(none)');

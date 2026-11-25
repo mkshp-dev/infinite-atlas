@@ -437,7 +437,9 @@ export function renderRegion({
 }
 
 // Pick a pleasant starting view: a coastline with a mix of land and water.
-export function findStart(seed, viewWorldSize = 2400) {
+// `preferLand` keeps the centre inland, which is what the descent wants: a
+// mostly-terrain view with water at the edges rather than open ocean below.
+export function findStart(seed, viewWorldSize = 2400, preferLand = false) {
   const samples = 8;
   const step = viewWorldSize / samples;
   const golden = Math.PI * (3 - Math.sqrt(5));
@@ -463,13 +465,19 @@ export function findStart(seed, viewWorldSize = 2400) {
     }
     const n = samples * samples;
     const waterFraction = water / n;
+    const landFraction = 1 - waterFraction;
     const variance = sumSq / n - (sum / n) ** 2;
+    const centreE = elevationAt(cx, cy, seed, 5);
 
-    // Favour a coastline with some relief to look at.
-    const score =
-      -Math.abs(waterFraction - 0.44) * 5 +
-      Math.min(variance, 0.02) * 10 +
-      (waterFraction > 0.2 && waterFraction < 0.7 ? 0.04 : 0);
+    const score = preferLand
+      ? landFraction * 2.6 +
+        Math.min(variance, 0.02) * 18 +
+        (centreE >= SEA_LEVEL ? 0.35 : -0.8) -
+        Math.abs(landFraction - 0.82) * 1.4
+      : // Favour a coastline with some relief to look at.
+        -Math.abs(waterFraction - 0.44) * 5 +
+        Math.min(variance, 0.02) * 10 +
+        (waterFraction > 0.2 && waterFraction < 0.7 ? 0.04 : 0);
     candidates.push({ x: cx, y: cy, score });
   }
 

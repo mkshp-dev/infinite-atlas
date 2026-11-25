@@ -47,6 +47,14 @@ body {
   cursor: grabbing;
 }
 
+body.is-descent #map {
+  cursor: crosshair;
+}
+
+body.is-descent #map.dragging {
+  cursor: grabbing;
+}
+
 .vignette {
   position: fixed;
   inset: 0;
@@ -108,6 +116,48 @@ h1 {
   color: var(--muted);
   font-size: 11.5px;
   line-height: 1.55;
+}
+
+/* Mode switch -------------------------------------------------------------- */
+
+.mode-switch {
+  display: inline-flex;
+  gap: 2px;
+  margin-top: 14px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.24);
+}
+
+.mode-switch button {
+  padding: 5px 14px;
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  color: var(--muted);
+  font-family: var(--sans);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: color 150ms ease, background 150ms ease;
+}
+
+.mode-switch button:hover {
+  color: var(--ink);
+}
+
+.mode-switch button.is-active {
+  background: rgba(217, 179, 108, 0.16);
+  color: #f2dcae;
+}
+
+.mode-switch button:focus-visible,
+.view-switch button:focus-visible {
+  outline: 2px solid rgba(217, 179, 108, 0.65);
+  outline-offset: 2px;
 }
 
 .seed-row {
@@ -205,6 +255,14 @@ h1 {
   grid-column: 1 / -1;
 }
 
+body.is-descent .stats {
+  grid-template-columns: repeat(4, 1fr);
+}
+
+body:not(.is-descent) .stat-alt {
+  display: none;
+}
+
 .stats dt {
   margin: 0;
   color: var(--muted);
@@ -271,6 +329,42 @@ h1 {
 .layers input:focus-visible + span {
   outline: 2px solid rgba(217, 179, 108, 0.65);
   outline-offset: 2px;
+}
+
+/* View switch ------------------------------------------------------------- */
+
+.view-switch {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.view-switch[hidden] {
+  display: none;
+}
+
+.view-switch button {
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--muted);
+  font-family: var(--sans);
+  font-size: 10.5px;
+  letter-spacing: 0.045em;
+  cursor: pointer;
+  transition: color 150ms ease, background 150ms ease, border-color 150ms ease;
+}
+
+.view-switch button:hover {
+  color: var(--ink);
+}
+
+.view-switch button.is-active {
+  border-color: rgba(217, 179, 108, 0.4);
+  background: rgba(217, 179, 108, 0.14);
+  color: #f2dcae;
 }
 
 /* Panel footer ------------------------------------------------------------ */

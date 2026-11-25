@@ -6,13 +6,13 @@
     <title>Infinite Atlas — procedural terrain</title>
     <meta
       name="description"
-      content="An endless procedural world generated entirely in your browser. Pan, zoom and share any view."
+      content="Fall into an endless procedural world generated entirely in your browser. Drift down by parachute as the terrain resolves, then switch to free-roam atlas mode."
     />
     <meta name="theme-color" content="#08161f" />
     <link rel="icon" href="favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="styles.css" />
   </head>
-  <body>
+  <body class="is-descent">
     <canvas id="map" role="application" aria-label="Infinite procedural terrain map"></canvas>
     <div class="vignette" aria-hidden="true"></div>
 
@@ -20,8 +20,13 @@
       <header class="panel-head">
         <p class="eyebrow">procedural atlas</p>
         <h1>Infinite Atlas</h1>
-        <p class="tagline">A whole world, generated in your browser as you explore.</p>
+        <p class="tagline">A whole world, generated in your browser as you fall into it.</p>
       </header>
+
+      <div class="mode-switch" role="group" aria-label="Experience">
+        <button id="mode-descent" class="is-active" type="button" aria-pressed="true">descent</button>
+        <button id="mode-atlas" type="button" aria-pressed="false">atlas</button>
+      </div>
 
       <div class="seed-row">
         <label class="field" for="seed">
@@ -47,6 +52,10 @@
         <div class="stat-wide">
           <dt>position</dt>
           <dd id="stat-pos">—</dd>
+        </div>
+        <div class="stat-alt">
+          <dt>altitude</dt>
+          <dd id="stat-alt">—</dd>
         </div>
         <div>
           <dt>zoom</dt>
@@ -77,6 +86,11 @@
         </label>
       </div>
 
+      <div id="view-switch" class="view-switch" role="group" aria-label="Camera">
+        <button id="view-third" class="is-active" type="button" aria-pressed="true">third person</button>
+        <button id="view-first" type="button" aria-pressed="false">canopy cam</button>
+      </div>
+
       <footer class="panel-foot">
         <span id="status" class="status">warming up…</span>
         <span class="foot-actions">
@@ -98,8 +112,8 @@
       <text x="24" y="47" text-anchor="middle" font-size="6.5" letter-spacing="1.5" fill="currentColor">N</text>
     </svg>
 
-    <p class="hint">
-      drag to pan · scroll to zoom · <kbd>WASD</kbd> move · <kbd>R</kbd> new world · <kbd>0</kbd> reset
+    <p class="hint" id="hint">
+      drag or <kbd>WASD</kbd> to steer · <kbd>shift</kbd> dive · <kbd>V</kbd> view · <kbd>M</kbd> atlas · <kbd>0</kbd> drop again
     </p>
 
     <div id="flash" class="flash" aria-hidden="true"></div>

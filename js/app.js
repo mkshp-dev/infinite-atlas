@@ -4,6 +4,13 @@
 import { TILE_SIZE, findStart } from './terrain.js';
 import { clamp, hashString } from './noise.js';
 import { TileEngine } from './tiles.js';
+import {
+  Descent,
+  START_ALTITUDE,
+  altitudeToScale,
+  scaleToAltitude,
+  drawDescentScene,
+} from './descent.js';
 
 const MIN_SCALE = 0.05;
 const MAX_SCALE = 32;
@@ -18,6 +25,7 @@ const ctx = canvas.getContext('2d', { alpha: false });
 
 const seedInput = $('seed');
 const posEl = $('stat-pos');
+const altEl = $('stat-alt');
 const scaleEl = $('stat-scale');
 const levelEl = $('stat-level');
 const fpsEl = $('stat-fps');
@@ -26,6 +34,12 @@ const scaleLine = $('scale-line');
 const scaleLabel = $('scale-label');
 const flashEl = $('flash');
 const toastEl = $('toast');
+const hintEl = $('hint');
+const viewSwitch = $('view-switch');
+const modeDescentBtn = $('mode-descent');
+const modeAtlasBtn = $('mode-atlas');
+const viewThirdBtn = $('view-third');
+const viewFirstBtn = $('view-first');
 
 const ADJECTIVES = ['quiet', 'amber', 'hollow', 'frost', 'ember', 'salt', 'moss', 'pale', 'wild', 'dusk', 'iron', 'glass', 'slow', 'north', 'burnt', 'silver'];
 const NOUNS = ['harbor', 'ridge', 'marsh', 'delta', 'basin', 'vale', 'reach', 'strand', 'mesa', 'fen', 'cove', 'field', 'isles', 'point', 'creek', 'heath'];
@@ -56,20 +70,49 @@ function startScale() {
   return clamp(width / START_VIEW_WORLD, 0.22, 0.7);
 }
 
+// Descent is the default experience: a parachutist drifts down and the world
+// resolves as the altitude drops. Atlas is the original free-roam view.
+const startMode = params.get('mode') === 'atlas' ? 'atlas' : 'descent';
+const startView = params.get('view') === 'first' ? 'first' : 'third';
+
 const start = hasView
   ? { x: urlX, y: urlY, scale: clamp(urlZ, MIN_SCALE, MAX_SCALE) }
   : (() => {
-      const spot = findStart(seed, START_VIEW_WORLD);
+      const spot = findStart(seed, START_VIEW_WORLD, startMode === 'descent');
       return { x: spot.x, y: spot.y, scale: startScale() };
     })();
+
+const descent = new Descent({
+  seed,
+  x: start.x,
+  y: start.y,
+  // A shared view stores scale in z; in descent the altitude is the source of
+  // truth, so convert back rather than trusting both.
+  altitude:
+    startMode === 'descent' && hasView
+      ? scaleToAltitude(clamp(urlZ, MIN_SCALE, MAX_SCALE))
+      : START_ALTITUDE,
+});
+
+const startCam =
+  startMode === 'descent'
+    ? { x: descent.x, y: descent.y, scale: altitudeToScale(descent.altitude) }
+    : { x: start.x, y: start.y, scale: start.scale };
 
 const state = {
   seedText,
   seed,
-  cam: { x: start.x, y: start.y, scale: start.scale },
-  target: { x: start.x, y: start.y, scale: start.scale },
+  mode: startMode,
+  view: startView,
+  descent,
+  cam: { x: startCam.x, y: startCam.y, scale: startCam.scale },
+  target: { x: startCam.x, y: startCam.y, scale: startCam.scale },
   options: { shading: true, contours: true, grain: true },
   level: 0,
+  landed: descent.landed,
+  // Hold the drop until the opening view has tiles, so the first thing seen is
+  // the world at 1×, then the descent begins.
+  dropping: false,
 };
 
 let engine;
@@ -118,6 +161,108 @@ function zoomAt(clientX, clientY, factor) {
   state.target.y = worldY - (py - rect.height / 2) / state.target.scale;
 }
 
+// On a phone the control panel spans the top of the screen, so the subject is
+// pushed down from the exact centre. Everything that maps screen space back to
+// the subject (camera and steering) uses this same offset.
+function descentDrop() {
+  const width = canvas.clientWidth || window.innerWidth;
+  const height = canvas.clientHeight || window.innerHeight;
+  return width <= 720 ? Math.min(220, height * 0.24) : 0;
+}
+
+// In descent the subject owns the camera. Altitude maps to zoom, so the view
+// gets closer and more detailed without any extra world data being stored.
+function syncDescentCamera() {
+  const d = state.descent;
+  const scale = altitudeToScale(d.altitude);
+  const drop = descentDrop();
+
+  state.cam.x = d.x;
+  state.cam.y = d.y - drop / scale;
+  state.cam.scale = scale;
+  state.target.x = state.cam.x;
+  state.target.y = state.cam.y;
+  state.target.scale = state.cam.scale;
+}
+
+// Pointer steering is a virtual stick around the subject: hold near it for a
+// gentle nudge, push toward an edge to lean into it.
+function pointerSteer() {
+  if (pointers.size === 0) return null;
+  const rect = canvas.getBoundingClientRect();
+  const [pointer] = pointers.values();
+  const cx = rect.left + rect.width / 2;
+  const cy = rect.top + rect.height / 2 + descentDrop();
+  const nx = (pointer.x - cx) / (rect.width * 0.34);
+  const ny = (pointer.y - cy) / (rect.height * 0.34);
+  const length = Math.hypot(nx, ny);
+  if (length < 0.12) return { x: 0, y: 0 };
+  const amount = Math.min(1, length);
+  return { x: (nx / length) * amount, y: (ny / length) * amount };
+}
+
+const HINTS = {
+  descent:
+    'drag or <kbd>WASD</kbd> to steer · <kbd>shift</kbd> dive · <kbd>V</kbd> view · <kbd>M</kbd> atlas · <kbd>0</kbd> drop again',
+  atlas:
+    'drag to pan · scroll to zoom · <kbd>WASD</kbd> move · <kbd>R</kbd> new world · <kbd>0</kbd> reset · <kbd>M</kbd> descent',
+};
+
+function syncModeUi() {
+  const descending = state.mode === 'descent';
+  document.body.classList.toggle('is-descent', descending);
+
+  modeDescentBtn.classList.toggle('is-active', descending);
+  modeAtlasBtn.classList.toggle('is-active', !descending);
+  modeDescentBtn.setAttribute('aria-pressed', String(descending));
+  modeAtlasBtn.setAttribute('aria-pressed', String(!descending));
+
+  viewSwitch.hidden = !descending;
+  const first = state.view === 'first';
+  viewThirdBtn.classList.toggle('is-active', !first);
+  viewFirstBtn.classList.toggle('is-active', first);
+  viewThirdBtn.setAttribute('aria-pressed', String(!first));
+  viewFirstBtn.setAttribute('aria-pressed', String(first));
+
+  hintEl.innerHTML = descending ? HINTS.descent : HINTS.atlas;
+  canvas.setAttribute(
+    'aria-label',
+    descending
+      ? 'Infinite procedural terrain, parachute descent'
+      : 'Infinite procedural terrain map',
+  );
+}
+
+function setMode(mode) {
+  if (mode === state.mode) return;
+
+  if (mode === 'descent') {
+    // Climb back to the top and drop over wherever the atlas was left.
+    state.descent.seed = state.seed;
+    state.descent.reset(state.cam.x, state.cam.y, START_ALTITUDE);
+    state.landed = false;
+    state.dropping = true;
+    syncDescentCamera();
+  } else {
+    state.target.x = state.cam.x;
+    state.target.y = state.cam.y;
+    state.target.scale = state.cam.scale;
+  }
+
+  state.mode = mode;
+  syncModeUi();
+  flash();
+  toast(mode === 'descent' ? 'descending' : 'free roam');
+  updateHash(true);
+}
+
+function setViewMode(view) {
+  if (view === state.view) return;
+  state.view = view;
+  syncModeUi();
+  updateHash(true);
+}
+
 function flash() {
   flashEl.classList.remove('run');
   void flashEl.offsetWidth;
@@ -134,8 +279,16 @@ function applySeed(text) {
   seedInput.blur();
   document.title = `Infinite Atlas — ${trimmed}`;
 
-  const spot = findStart(state.seed, 2600);
-  setView(spot.x, spot.y, startScale());
+  const spot = findStart(state.seed, START_VIEW_WORLD, state.mode === 'descent');
+  if (state.mode === 'descent') {
+    state.descent.seed = state.seed;
+    state.descent.reset(spot.x, spot.y, START_ALTITUDE);
+    state.landed = false;
+    state.dropping = true;
+    syncDescentCamera();
+  } else {
+    setView(spot.x, spot.y, startScale());
+  }
   engine?.configure({ seed: state.seed, options: state.options });
 
   flash();
@@ -143,8 +296,15 @@ function applySeed(text) {
 }
 
 function resetView() {
-  const spot = findStart(state.seed, START_VIEW_WORLD);
-  setView(spot.x, spot.y, startScale());
+  const spot = findStart(state.seed, START_VIEW_WORLD, state.mode === 'descent');
+  if (state.mode === 'descent') {
+    state.descent.reset(spot.x, spot.y, START_ALTITUDE);
+    state.landed = false;
+    state.dropping = true;
+    syncDescentCamera();
+  } else {
+    setView(spot.x, spot.y, startScale());
+  }
   flash();
 }
 
@@ -159,8 +319,10 @@ function updateHash(force = false) {
 
   const next = new URLSearchParams();
   next.set('seed', state.seedText);
-  next.set('x', state.cam.x.toFixed(1));
-  next.set('y', state.cam.y.toFixed(1));
+  next.set('mode', state.mode);
+  next.set('view', state.view);
+  next.set('x', (state.mode === 'descent' ? state.descent.x : state.cam.x).toFixed(1));
+  next.set('y', (state.mode === 'descent' ? state.descent.y : state.cam.y).toFixed(1));
   next.set('z', state.cam.scale.toFixed(3));
   const hash = `#${next.toString()}`;
   if (location.hash !== hash) history.replaceState(null, '', hash);
@@ -208,6 +370,14 @@ canvas.addEventListener('pointerdown', (event) => {
   canvas.setPointerCapture(event.pointerId);
   pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
 
+  if (state.mode === 'descent') {
+    // Dragging steers the canopy; the frame loop reads the pointer position.
+    drag = null;
+    pinch = null;
+    canvas.classList.add('dragging');
+    return;
+  }
+
   if (pointers.size === 1) {
     drag = { x: event.clientX, y: event.clientY };
     canvas.classList.add('dragging');
@@ -219,8 +389,9 @@ canvas.addEventListener('pointerdown', (event) => {
 
 canvas.addEventListener('pointermove', (event) => {
   if (!pointers.has(event.pointerId)) return;
-  const previous = pointers.get(event.pointerId);
   pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+
+  if (state.mode === 'descent') return;
 
   if (pointers.size === 1 && drag) {
     const dx = event.clientX - drag.x;
@@ -271,6 +442,7 @@ canvas.addEventListener(
   'wheel',
   (event) => {
     event.preventDefault();
+    if (state.mode === 'descent') return;
     const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 400 : 1;
     const factor = Math.exp(-event.deltaY * unit * (event.ctrlKey ? 0.008 : 0.0016));
     zoomAt(event.clientX, event.clientY, factor);
@@ -279,6 +451,7 @@ canvas.addEventListener(
 );
 
 canvas.addEventListener('dblclick', (event) => {
+  if (state.mode === 'descent') return;
   zoomAt(event.clientX, event.clientY, 2);
 });
 
@@ -293,12 +466,18 @@ window.addEventListener('keydown', (event) => {
     applySeed(randomSeed());
   } else if (key === '0') {
     resetView();
+  } else if (key === 'm') {
+    setMode(state.mode === 'descent' ? 'atlas' : 'descent');
+  } else if (key === 'v') {
+    if (state.mode === 'descent') setViewMode(state.view === 'first' ? 'third' : 'first');
   } else if (key === 'h') {
     $('opt-shading').click();
   } else if (key === 'c') {
     $('opt-contours').click();
   } else if (key === 'g') {
     $('opt-grain').click();
+  } else if (key === 'shift') {
+    heldKeys.add('shift');
   } else if (['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright', '+', '=', '-', '_'].includes(key)) {
     heldKeys.add(key);
     event.preventDefault();
@@ -319,20 +498,41 @@ window.addEventListener('hashchange', () => {
   const x = parseFloat(next.get('x'));
   const y = parseFloat(next.get('y'));
   const z = parseFloat(next.get('z'));
-  const view = Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z);
+  const hasSharedView = Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z);
+  const mode = next.get('mode') === 'atlas' ? 'atlas' : 'descent';
+  const view = next.get('view') === 'first' ? 'first' : 'third';
 
-  if (text !== state.seedText) {
+  const seedChanged = text !== state.seedText;
+  if (seedChanged) {
     state.seedText = text;
     state.seed = hashString(text);
     seedInput.value = text;
     document.title = `Infinite Atlas — ${text}`;
-    const spot = findStart(state.seed, START_VIEW_WORLD);
-    setView(view ? x : spot.x, view ? y : spot.y, view ? z : startScale());
     engine?.configure({ seed: state.seed, options: state.options });
-    flash();
-  } else if (view) {
-    setView(x, y, z);
   }
+
+  state.mode = mode;
+  state.view = view;
+
+  if (mode === 'descent') {
+    const spot = hasSharedView ? { x, y } : findStart(state.seed, START_VIEW_WORLD, state.mode === 'descent');
+    const altitude = hasSharedView
+      ? scaleToAltitude(clamp(z, MIN_SCALE, MAX_SCALE))
+      : START_ALTITUDE;
+    state.descent.seed = state.seed;
+    state.descent.reset(spot.x, spot.y, altitude);
+    state.landed = state.descent.landed;
+    state.dropping = true;
+    syncDescentCamera();
+  } else if (hasSharedView) {
+    setView(x, y, z);
+  } else if (seedChanged) {
+    const spot = findStart(state.seed, START_VIEW_WORLD, state.mode === 'descent');
+    setView(spot.x, spot.y, startScale());
+  }
+
+  syncModeUi();
+  flash();
 });
 
 // --- UI wiring --------------------------------------------------------------
@@ -350,6 +550,12 @@ seedInput.addEventListener('keydown', (event) => {
 $('new-seed').addEventListener('click', () => applySeed(randomSeed()));
 $('share').addEventListener('click', copyLink);
 $('reset').addEventListener('click', resetView);
+
+modeDescentBtn.addEventListener('click', () => setMode('descent'));
+modeAtlasBtn.addEventListener('click', () => setMode('atlas'));
+viewThirdBtn.addEventListener('click', () => setViewMode('third'));
+viewFirstBtn.addEventListener('click', () => setViewMode('first'));
+syncModeUi();
 
 for (const [id, option] of [
   ['opt-shading', 'shading'],
@@ -456,6 +662,23 @@ function render(now) {
   }
 
   engine?.endFrame({ tx: Math.floor((x - left) / worldSize), ty: Math.floor((y - top) / worldSize) });
+
+  if (state.mode === 'descent') {
+    const d = state.descent;
+    drawDescentScene(ctx, {
+      sx: (d.x - left) * scale,
+      sy: (d.y - top) * scale,
+      width,
+      height,
+      time: now / 1000,
+      view: state.view,
+      altitude: d.altitude,
+      landed: d.landed,
+      windAngle: d.windAngle,
+      windStrength: d.windStrength,
+      dpr: DPR,
+    });
+  }
 }
 
 // --- HUD --------------------------------------------------------------------
@@ -485,6 +708,8 @@ function updateHud(now) {
   lastHud = now;
 
   posEl.textContent = `${formatNumber.format(state.cam.x)}, ${formatNumber.format(state.cam.y)}`;
+  altEl.textContent =
+    state.mode === 'descent' ? `${formatNumber.format(state.descent.altitude)} m` : '—';
   scaleEl.textContent = `${state.cam.scale.toFixed(2)}×`;
   levelEl.textContent = `L${state.level}`;
   fpsEl.textContent = `${Math.round(fps)}`;
@@ -504,6 +729,9 @@ function updateHud(now) {
   } else if (pending > 0) {
     statusEl.textContent = `generating ${pending} tile${pending === 1 ? '' : 's'}`;
     statusEl.classList.add('busy');
+  } else if (state.mode === 'descent' && state.descent.landed) {
+    statusEl.textContent = 'landed — M for atlas';
+    statusEl.classList.remove('busy');
   } else {
     statusEl.textContent = 'world ready';
     statusEl.classList.remove('busy');
@@ -524,32 +752,68 @@ function frame(now) {
 
   if (dt > 0) fps = fps * 0.92 + (1 / dt) * 0.08;
 
-  // Smoothly chase the target camera.
-  const ease = 1 - Math.exp(-dt * 16);
-  state.cam.x += (state.target.x - state.cam.x) * ease;
-  state.cam.y += (state.target.y - state.cam.y) * ease;
-  state.cam.scale *= Math.pow(state.target.scale / state.cam.scale, ease);
+  if (state.mode === 'descent') {
+    const d = state.descent;
 
-  // Keyboard panning.
-  let moveX = 0;
-  let moveY = 0;
-  if (heldKeys.has('a') || heldKeys.has('arrowleft')) moveX -= 1;
-  if (heldKeys.has('d') || heldKeys.has('arrowright')) moveX += 1;
-  if (heldKeys.has('w') || heldKeys.has('arrowup')) moveY -= 1;
-  if (heldKeys.has('s') || heldKeys.has('arrowdown')) moveY += 1;
+    // Wait for the opening view before letting gravity take over.
+    if (!state.dropping && engine && engine.pending === 0 && engine.cached > 0) {
+      state.dropping = true;
+    }
 
-  if (moveX || moveY) {
-    const length = Math.hypot(moveX, moveY);
-    const speed = 760 / state.cam.scale;
-    state.target.x += (moveX / length) * speed * dt;
-    state.target.y += (moveY / length) * speed * dt;
-  }
+    if (state.dropping) {
+      let steerX = 0;
+      let steerY = 0;
+      if (heldKeys.has('a') || heldKeys.has('arrowleft')) steerX -= 1;
+      if (heldKeys.has('d') || heldKeys.has('arrowright')) steerX += 1;
+      if (heldKeys.has('w') || heldKeys.has('arrowup')) steerY -= 1;
+      if (heldKeys.has('s') || heldKeys.has('arrowdown')) steerY += 1;
+      const length = Math.hypot(steerX, steerY);
+      if (length > 0) {
+        steerX /= length;
+        steerY /= length;
+      }
 
-  if (heldKeys.has('+') || heldKeys.has('=')) {
-    zoomAt(window.innerWidth / 2, window.innerHeight / 2, 1 + dt * 2.2);
-  }
-  if (heldKeys.has('-') || heldKeys.has('_')) {
-    zoomAt(window.innerWidth / 2, window.innerHeight / 2, 1 / (1 + dt * 2.2));
+      const pointer = pointerSteer();
+      if (pointer && (pointer.x !== 0 || pointer.y !== 0)) {
+        steerX = pointer.x;
+        steerY = pointer.y;
+      }
+
+      const wasLanded = d.landed;
+      d.update(dt, { x: steerX, y: steerY }, heldKeys.has('shift'));
+      if (d.landed && !wasLanded) toast('touchdown — press M for the atlas');
+      state.landed = d.landed;
+    }
+
+    syncDescentCamera();
+  } else {
+    // Smoothly chase the target camera.
+    const ease = 1 - Math.exp(-dt * 16);
+    state.cam.x += (state.target.x - state.cam.x) * ease;
+    state.cam.y += (state.target.y - state.cam.y) * ease;
+    state.cam.scale *= Math.pow(state.target.scale / state.cam.scale, ease);
+
+    // Keyboard panning.
+    let moveX = 0;
+    let moveY = 0;
+    if (heldKeys.has('a') || heldKeys.has('arrowleft')) moveX -= 1;
+    if (heldKeys.has('d') || heldKeys.has('arrowright')) moveX += 1;
+    if (heldKeys.has('w') || heldKeys.has('arrowup')) moveY -= 1;
+    if (heldKeys.has('s') || heldKeys.has('arrowdown')) moveY += 1;
+
+    if (moveX || moveY) {
+      const length = Math.hypot(moveX, moveY);
+      const speed = 760 / state.cam.scale;
+      state.target.x += (moveX / length) * speed * dt;
+      state.target.y += (moveY / length) * speed * dt;
+    }
+
+    if (heldKeys.has('+') || heldKeys.has('=')) {
+      zoomAt(window.innerWidth / 2, window.innerHeight / 2, 1 + dt * 2.2);
+    }
+    if (heldKeys.has('-') || heldKeys.has('_')) {
+      zoomAt(window.innerWidth / 2, window.innerHeight / 2, 1 / (1 + dt * 2.2));
+    }
   }
 
   if (engine) render(now);
