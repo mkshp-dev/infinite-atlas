@@ -225,6 +225,9 @@ function syncModeUi() {
   viewFirstBtn.setAttribute('aria-pressed', String(first));
 
   hintEl.innerHTML = descending ? HINTS.descent : HINTS.atlas;
+  $('reset').title = descending
+    ? 'Drop again from the start (0)'
+    : 'Return to the starting view (0)';
   canvas.setAttribute(
     'aria-label',
     descending
