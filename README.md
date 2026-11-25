@@ -22,6 +22,19 @@ python3 -m http.server 8123
 
 Then open <http://127.0.0.1:8123/>.
 
+### Docker (optional)
+
+A minimal nginx container is included in `deploy/` and serves only the public
+site files (read-only). It expects an external Docker network named
+`homelab-network`; adjust or remove the `networks` block for another host.
+
+```bash
+docker compose -f deploy/docker-compose.yml up -d
+```
+
+The container sets `Cache-Control: no-cache`, so changes to the bind-mounted
+files appear on the next request.
+
 ## Controls
 
 | Input | Action |

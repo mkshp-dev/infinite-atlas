@@ -1,0 +1,20 @@
+name: vps-procedural-atlas
+
+services:
+  atlas:
+    image: nginx:1.27-alpine
+    container_name: vps-procedural-atlas
+    restart: unless-stopped
+    # Only the public site is mounted; .git, tools and docs stay out of the
+    # web root. Read-only, so the container can never modify the project.
+    volumes:
+      - ../index.html:/usr/share/nginx/html/index.html:ro
+      - ../styles.css:/usr/share/nginx/html/styles.css:ro
+      - ../favicon.svg:/usr/share/nginx/html/favicon.svg:ro
+      - ../js:/usr/share/nginx/html/js:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    networks: [homelab-network]
+
+networks:
+  homelab-network:
+    external: true
