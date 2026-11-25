@@ -1,0 +1,4 @@
+# No dependencies are required to run the atlas, but keep local tooling out.
+node_modules/
+.DS_Store
+*.log

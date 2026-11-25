@@ -1,0 +1,567 @@
+// App shell: camera, input, tile drawing and HUD.
+// All generation happens in workers; this file only decides what is on screen.
+
+import { TILE_SIZE, findStart } from './terrain.js';
+import { clamp, hashString } from './noise.js';
+import { TileEngine } from './tiles.js';
+
+const MIN_SCALE = 0.05;
+const MAX_SCALE = 32;
+const START_VIEW_WORLD = 2600;
+const DPR = Math.min(window.devicePixelRatio || 1, 2);
+const WORKER_COUNT = Math.min(Math.max((navigator.hardwareConcurrency || 4) - 1, 2), 6);
+const MAX_TILES = DPR > 1.5 ? 72 : 160;
+
+const $ = (id) => document.getElementById(id);
+const canvas = $('map');
+const ctx = canvas.getContext('2d', { alpha: false });
+
+const seedInput = $('seed');
+const posEl = $('stat-pos');
+const scaleEl = $('stat-scale');
+const levelEl = $('stat-level');
+const fpsEl = $('stat-fps');
+const statusEl = $('status');
+const scaleLine = $('scale-line');
+const scaleLabel = $('scale-label');
+const flashEl = $('flash');
+const toastEl = $('toast');
+
+const ADJECTIVES = ['quiet', 'amber', 'hollow', 'frost', 'ember', 'salt', 'moss', 'pale', 'wild', 'dusk', 'iron', 'glass', 'slow', 'north', 'burnt', 'silver'];
+const NOUNS = ['harbor', 'ridge', 'marsh', 'delta', 'basin', 'vale', 'reach', 'strand', 'mesa', 'fen', 'cove', 'field', 'isles', 'point', 'creek', 'heath'];
+
+const formatNumber = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
+
+function randomSeed() {
+  const a = ADJECTIVES[(Math.random() * ADJECTIVES.length) | 0];
+  const b = NOUNS[(Math.random() * NOUNS.length) | 0];
+  return `${a}-${b}-${10 + ((Math.random() * 90) | 0)}`;
+}
+
+// --- Initial state ----------------------------------------------------------
+
+const params = new URLSearchParams(location.hash.replace(/^#/, ''));
+const seedText = (params.get('seed') || '').trim() || randomSeed();
+const seed = hashString(seedText);
+
+const urlX = parseFloat(params.get('x'));
+const urlY = parseFloat(params.get('y'));
+const urlZ = parseFloat(params.get('z'));
+const hasView = Number.isFinite(urlX) && Number.isFinite(urlY) && Number.isFinite(urlZ);
+
+// On a phone the viewport is much narrower, so a fixed zoom would open on a
+// tiny slice of the chosen coastline. Fit roughly the same amount of world.
+function startScale() {
+  const width = canvas.clientWidth || window.innerWidth || 1440;
+  return clamp(width / START_VIEW_WORLD, 0.22, 0.7);
+}
+
+const start = hasView
+  ? { x: urlX, y: urlY, scale: clamp(urlZ, MIN_SCALE, MAX_SCALE) }
+  : (() => {
+      const spot = findStart(seed, START_VIEW_WORLD);
+      return { x: spot.x, y: spot.y, scale: startScale() };
+    })();
+
+const state = {
+  seedText,
+  seed,
+  cam: { x: start.x, y: start.y, scale: start.scale },
+  target: { x: start.x, y: start.y, scale: start.scale },
+  options: { shading: true, contours: true, grain: true },
+  level: 0,
+};
+
+let engine;
+try {
+  engine = new TileEngine({
+    dpr: DPR,
+    workerCount: WORKER_COUNT,
+    maxTiles: MAX_TILES,
+  });
+} catch (error) {
+  console.error('Could not start tile workers:', error);
+  statusEl.textContent = 'workers unavailable';
+}
+
+if (engine) engine.configure({ seed: state.seed, options: state.options });
+
+// Handy for debugging from the console and for the screenshot harness.
+window.__atlas = { state, engine };
+
+seedInput.value = state.seedText;
+document.title = `Infinite Atlas — ${state.seedText}`;
+
+// --- Camera helpers ---------------------------------------------------------
+
+function setView(x, y, scale) {
+  state.target.x = x;
+  state.target.y = y;
+  state.target.scale = clamp(scale, MIN_SCALE, MAX_SCALE);
+  state.cam.x = state.target.x;
+  state.cam.y = state.target.y;
+  state.cam.scale = state.target.scale;
+}
+
+function zoomAt(clientX, clientY, factor) {
+  const rect = canvas.getBoundingClientRect();
+  const px = clientX - rect.left;
+  const py = clientY - rect.top;
+  const scale = state.target.scale;
+
+  const worldX = state.target.x + (px - rect.width / 2) / scale;
+  const worldY = state.target.y + (py - rect.height / 2) / scale;
+
+  state.target.scale = clamp(scale * factor, MIN_SCALE, MAX_SCALE);
+
+  state.target.x = worldX - (px - rect.width / 2) / state.target.scale;
+  state.target.y = worldY - (py - rect.height / 2) / state.target.scale;
+}
+
+function flash() {
+  flashEl.classList.remove('run');
+  void flashEl.offsetWidth;
+  flashEl.classList.add('run');
+}
+
+function applySeed(text) {
+  const trimmed = String(text || '').trim();
+  if (!trimmed) return;
+
+  state.seedText = trimmed;
+  state.seed = hashString(trimmed);
+  seedInput.value = trimmed;
+  seedInput.blur();
+  document.title = `Infinite Atlas — ${trimmed}`;
+
+  const spot = findStart(state.seed, 2600);
+  setView(spot.x, spot.y, startScale());
+  engine?.configure({ seed: state.seed, options: state.options });
+
+  flash();
+  updateHash(true);
+}
+
+function resetView() {
+  const spot = findStart(state.seed, START_VIEW_WORLD);
+  setView(spot.x, spot.y, startScale());
+  flash();
+}
+
+// --- URL state --------------------------------------------------------------
+
+let lastHashAt = 0;
+
+function updateHash(force = false) {
+  const now = performance.now();
+  if (!force && now - lastHashAt < 500) return;
+  lastHashAt = now;
+
+  const next = new URLSearchParams();
+  next.set('seed', state.seedText);
+  next.set('x', state.cam.x.toFixed(1));
+  next.set('y', state.cam.y.toFixed(1));
+  next.set('z', state.cam.scale.toFixed(3));
+  const hash = `#${next.toString()}`;
+  if (location.hash !== hash) history.replaceState(null, '', hash);
+}
+
+let toastTimer = 0;
+function toast(message) {
+  toastEl.textContent = message;
+  toastEl.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toastEl.classList.remove('show'), 1800);
+}
+
+async function copyLink() {
+  updateHash(true);
+  const url = location.href;
+  try {
+    await navigator.clipboard.writeText(url);
+    toast('link copied');
+  } catch {
+    const field = document.createElement('textarea');
+    field.value = url;
+    field.style.position = 'fixed';
+    field.style.opacity = '0';
+    document.body.appendChild(field);
+    field.select();
+    try {
+      document.execCommand('copy');
+      toast('link copied');
+    } catch {
+      toast('copy failed');
+    }
+    field.remove();
+  }
+}
+
+// --- Input ------------------------------------------------------------------
+
+const pointers = new Map();
+let drag = null;
+let pinch = null;
+
+canvas.addEventListener('pointerdown', (event) => {
+  if (event.pointerType === 'mouse' && event.button !== 0) return;
+  canvas.setPointerCapture(event.pointerId);
+  pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+
+  if (pointers.size === 1) {
+    drag = { x: event.clientX, y: event.clientY };
+    canvas.classList.add('dragging');
+  } else {
+    drag = null;
+    pinch = null;
+  }
+});
+
+canvas.addEventListener('pointermove', (event) => {
+  if (!pointers.has(event.pointerId)) return;
+  const previous = pointers.get(event.pointerId);
+  pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+
+  if (pointers.size === 1 && drag) {
+    const dx = event.clientX - drag.x;
+    const dy = event.clientY - drag.y;
+    drag = { x: event.clientX, y: event.clientY };
+    state.target.x -= dx / state.target.scale;
+    state.target.y -= dy / state.target.scale;
+    state.cam.x = state.target.x;
+    state.cam.y = state.target.y;
+    return;
+  }
+
+  if (pointers.size >= 2) {
+    const [a, b] = Array.from(pointers.values());
+    const distance = Math.hypot(a.x - b.x, a.y - b.y);
+    const midX = (a.x + b.x) / 2;
+    const midY = (a.y + b.y) / 2;
+
+    if (pinch) {
+      const factor = distance / Math.max(pinch.distance, 1);
+      zoomAt(midX, midY, factor);
+      state.target.x -= (midX - pinch.midX) / state.target.scale;
+      state.target.y -= (midY - pinch.midY) / state.target.scale;
+      state.cam.x = state.target.x;
+      state.cam.y = state.target.y;
+      state.cam.scale = state.target.scale;
+    }
+    pinch = { distance, midX, midY };
+  }
+});
+
+function endPointer(event) {
+  pointers.delete(event.pointerId);
+  if (pointers.size === 1) {
+    const [remaining] = pointers.values();
+    drag = { x: remaining.x, y: remaining.y };
+  } else {
+    drag = null;
+  }
+  if (pointers.size < 2) pinch = null;
+  if (pointers.size === 0) canvas.classList.remove('dragging');
+}
+
+canvas.addEventListener('pointerup', endPointer);
+canvas.addEventListener('pointercancel', endPointer);
+
+canvas.addEventListener(
+  'wheel',
+  (event) => {
+    event.preventDefault();
+    const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 400 : 1;
+    const factor = Math.exp(-event.deltaY * unit * (event.ctrlKey ? 0.008 : 0.0016));
+    zoomAt(event.clientX, event.clientY, factor);
+  },
+  { passive: false },
+);
+
+canvas.addEventListener('dblclick', (event) => {
+  zoomAt(event.clientX, event.clientY, 2);
+});
+
+const heldKeys = new Set();
+
+window.addEventListener('keydown', (event) => {
+  const tag = event.target instanceof HTMLElement ? event.target.tagName : '';
+  if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+
+  const key = event.key.toLowerCase();
+  if (key === 'r') {
+    applySeed(randomSeed());
+  } else if (key === '0') {
+    resetView();
+  } else if (key === 'h') {
+    $('opt-shading').click();
+  } else if (key === 'c') {
+    $('opt-contours').click();
+  } else if (key === 'g') {
+    $('opt-grain').click();
+  } else if (['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright', '+', '=', '-', '_'].includes(key)) {
+    heldKeys.add(key);
+    event.preventDefault();
+  }
+});
+
+window.addEventListener('keyup', (event) => {
+  heldKeys.delete(event.key.toLowerCase());
+});
+
+window.addEventListener('blur', () => heldKeys.clear());
+
+window.addEventListener('hashchange', () => {
+  const next = new URLSearchParams(location.hash.replace(/^#/, ''));
+  const text = (next.get('seed') || '').trim();
+  if (!text) return;
+
+  const x = parseFloat(next.get('x'));
+  const y = parseFloat(next.get('y'));
+  const z = parseFloat(next.get('z'));
+  const view = Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z);
+
+  if (text !== state.seedText) {
+    state.seedText = text;
+    state.seed = hashString(text);
+    seedInput.value = text;
+    document.title = `Infinite Atlas — ${text}`;
+    const spot = findStart(state.seed, START_VIEW_WORLD);
+    setView(view ? x : spot.x, view ? y : spot.y, view ? z : startScale());
+    engine?.configure({ seed: state.seed, options: state.options });
+    flash();
+  } else if (view) {
+    setView(x, y, z);
+  }
+});
+
+// --- UI wiring --------------------------------------------------------------
+
+seedInput.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    applySeed(seedInput.value);
+  } else if (event.key === 'Escape') {
+    seedInput.value = state.seedText;
+    seedInput.blur();
+  }
+});
+
+$('new-seed').addEventListener('click', () => applySeed(randomSeed()));
+$('share').addEventListener('click', copyLink);
+$('reset').addEventListener('click', resetView);
+
+for (const [id, option] of [
+  ['opt-shading', 'shading'],
+  ['opt-contours', 'contours'],
+  ['opt-grain', 'grain'],
+]) {
+  const input = $(id);
+  input.checked = state.options[option];
+  input.addEventListener('change', () => {
+    state.options[option] = input.checked;
+    engine?.configure({ seed: state.seed, options: state.options });
+  });
+}
+
+// --- Rendering --------------------------------------------------------------
+
+function drawFallback(level, tx, ty, dx, dy, dw, dh) {
+  // Zooming in: reuse a coarser ancestor, cropped to this tile's quadrant.
+  for (let up = 1; up <= 4; up++) {
+    const factor = 1 << up;
+    const parent = engine.peek(level - up, Math.floor(tx / factor), Math.floor(ty / factor));
+    if (!parent) continue;
+    const source = engine.pixelSize / factor;
+    const sx = (tx - Math.floor(tx / factor) * factor) * source;
+    const sy = (ty - Math.floor(ty / factor) * factor) * source;
+    ctx.drawImage(parent.bitmap, sx, sy, source, source, dx, dy, dw, dh);
+    return true;
+  }
+
+  // Zooming out: stitch the four children, if any are cached.
+  let drew = false;
+  const halfW = dw / 2;
+  const halfH = dh / 2;
+  for (let cy = 0; cy < 2; cy++) {
+    for (let cx = 0; cx < 2; cx++) {
+      const child = engine.peek(level + 1, tx * 2 + cx, ty * 2 + cy);
+      if (!child) continue;
+      ctx.drawImage(child.bitmap, dx + cx * halfW, dy + cy * halfH, halfW, halfH);
+      drew = true;
+    }
+  }
+  return drew;
+}
+
+function render(now) {
+  const width = canvas.clientWidth;
+  const height = canvas.clientHeight;
+  if (width === 0 || height === 0) return;
+
+  const pixelWidth = Math.round(width * DPR);
+  const pixelHeight = Math.round(height * DPR);
+  if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+    canvas.width = pixelWidth;
+    canvas.height = pixelHeight;
+  }
+
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.fillStyle = '#0a1d29';
+  ctx.fillRect(0, 0, width, height);
+
+  const { x, y, scale } = state.cam;
+  const level = clamp(Math.round(Math.log2(scale)), -6, 8);
+  state.level = level;
+
+  const worldSize = TILE_SIZE / 2 ** level;
+  const tileScreen = worldSize * scale;
+  const left = x - width / (2 * scale);
+  const top = y - height / (2 * scale);
+
+  const tx0 = Math.floor(left / worldSize);
+  const tx1 = Math.floor((left + width / scale) / worldSize);
+  const ty0 = Math.floor(top / worldSize);
+  const ty1 = Math.floor((top + height / scale) / worldSize);
+
+  engine?.beginFrame();
+
+  for (let ty = ty0; ty <= ty1; ty++) {
+    for (let tx = tx0; tx <= tx1; tx++) {
+      const screenX = (tx * worldSize - left) * scale;
+      const screenY = (ty * worldSize - top) * scale;
+      const dx = screenX;
+      const dy = screenY;
+      const dw = tileScreen;
+      const dh = tileScreen;
+
+      const entry = engine?.request(level, tx, ty);
+      if (!engine) continue;
+
+      if (!entry) {
+        drawFallback(level, tx, ty, dx, dy, dw, dh);
+        continue;
+      }
+
+      // Cross-fade a freshly rendered tile over whatever fallback is already
+      // there. With nothing underneath, draw it opaque: fading against the
+      // dark canvas would show every tile as a darker square.
+      const age = now - entry.born;
+      let faded = false;
+      if (age < 220) faded = drawFallback(level, tx, ty, dx, dy, dw, dh);
+      if (faded) ctx.globalAlpha = 0.2 + 0.8 * (age / 220);
+      ctx.drawImage(entry.bitmap, dx, dy, dw, dh);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  engine?.endFrame({ tx: Math.floor((x - left) / worldSize), ty: Math.floor((y - top) / worldSize) });
+}
+
+// --- HUD --------------------------------------------------------------------
+
+let fps = 60;
+let lastHud = 0;
+
+function niceDistance(raw) {
+  const power = 10 ** Math.floor(Math.log10(raw));
+  for (const step of [1, 2, 5, 10]) {
+    if (step * power >= raw) return step * power;
+  }
+  return 10 * power;
+}
+
+function formatDistance(units) {
+  if (units >= 1000) {
+    const km = units / 1000;
+    return `${km >= 10 ? Math.round(km) : km.toFixed(1)} km`;
+  }
+  return `${Math.round(units)} m`;
+}
+
+function updateHud(now) {
+  const pending = engine ? engine.pending : 0;
+  if (now - lastHud < 140) return;
+  lastHud = now;
+
+  posEl.textContent = `${formatNumber.format(state.cam.x)}, ${formatNumber.format(state.cam.y)}`;
+  scaleEl.textContent = `${state.cam.scale.toFixed(2)}×`;
+  levelEl.textContent = `L${state.level}`;
+  fpsEl.textContent = `${Math.round(fps)}`;
+
+  const metresPerPixel = 1 / state.cam.scale;
+  scaleEl.title = `${metresPerPixel.toFixed(2)} m per pixel`;
+
+  if (!engine) {
+    statusEl.textContent = 'workers unavailable';
+    statusEl.classList.remove('busy');
+    return;
+  }
+
+  if (engine.cached === 0 && now > 8000) {
+    statusEl.textContent = 'no tiles — serve over http';
+    statusEl.classList.remove('busy');
+  } else if (pending > 0) {
+    statusEl.textContent = `generating ${pending} tile${pending === 1 ? '' : 's'}`;
+    statusEl.classList.add('busy');
+  } else {
+    statusEl.textContent = 'world ready';
+    statusEl.classList.remove('busy');
+  }
+
+  const distance = niceDistance(115 / state.cam.scale);
+  scaleLine.style.width = `${Math.round(distance * state.cam.scale)}px`;
+  scaleLabel.textContent = formatDistance(distance);
+}
+
+// --- Main loop --------------------------------------------------------------
+
+let lastTime = performance.now();
+
+function frame(now) {
+  const dt = Math.min(0.05, Math.max(0, (now - lastTime) / 1000));
+  lastTime = now;
+
+  if (dt > 0) fps = fps * 0.92 + (1 / dt) * 0.08;
+
+  // Smoothly chase the target camera.
+  const ease = 1 - Math.exp(-dt * 16);
+  state.cam.x += (state.target.x - state.cam.x) * ease;
+  state.cam.y += (state.target.y - state.cam.y) * ease;
+  state.cam.scale *= Math.pow(state.target.scale / state.cam.scale, ease);
+
+  // Keyboard panning.
+  let moveX = 0;
+  let moveY = 0;
+  if (heldKeys.has('a') || heldKeys.has('arrowleft')) moveX -= 1;
+  if (heldKeys.has('d') || heldKeys.has('arrowright')) moveX += 1;
+  if (heldKeys.has('w') || heldKeys.has('arrowup')) moveY -= 1;
+  if (heldKeys.has('s') || heldKeys.has('arrowdown')) moveY += 1;
+
+  if (moveX || moveY) {
+    const length = Math.hypot(moveX, moveY);
+    const speed = 760 / state.cam.scale;
+    state.target.x += (moveX / length) * speed * dt;
+    state.target.y += (moveY / length) * speed * dt;
+  }
+
+  if (heldKeys.has('+') || heldKeys.has('=')) {
+    zoomAt(window.innerWidth / 2, window.innerHeight / 2, 1 + dt * 2.2);
+  }
+  if (heldKeys.has('-') || heldKeys.has('_')) {
+    zoomAt(window.innerWidth / 2, window.innerHeight / 2, 1 / (1 + dt * 2.2));
+  }
+
+  if (engine) render(now);
+  updateHud(now);
+  updateHash();
+  requestAnimationFrame(frame);
+}
+
+window.addEventListener('resize', () => {
+  // The canvas size is reconciled in render(); this just keeps the transform
+  // correct for the next frame.
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+});
+
+requestAnimationFrame(frame);
