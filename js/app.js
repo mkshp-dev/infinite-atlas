@@ -216,7 +216,7 @@ const HINTS = {
   atlas:
     'drag to pan · scroll to zoom · <kbd>WASD</kbd> move · <kbd>R</kbd> new world · <kbd>0</kbd> reset · <kbd>3</kbd> 3D · <kbd>M</kbd> descent',
   three:
-    'drag to orbit · scroll or pinch to zoom · <kbd>M</kbd> or <kbd>3</kbd> atlas · <kbd>0</kbd> reset camera',
+    'drag to orbit · right-drag to pan · scroll to zoom · <kbd>M</kbd> or <kbd>3</kbd> atlas · <kbd>0</kbd> reset camera',
 };
 
 function syncModeUi() {
@@ -836,10 +836,13 @@ function updateHud(now) {
   if (state.mode === '3d') {
     const view = state.view3d;
     const center = view?.getCenter() || { x: state.cam.x, y: state.cam.y };
+    const stats = view?.stats;
     posEl.textContent = `${formatNumber.format(center.x)}, ${formatNumber.format(center.y)}`;
     altEl.textContent = '—';
     scaleEl.textContent = '3D';
-    scaleEl.title = 'bounded local terrain';
+    scaleEl.title = stats
+      ? `chunks ${stats.activeChunks} · pending ${stats.pendingChunks} · LOD ${stats.lodCounts.slice(0, 3).join('/')}`
+      : 'chunked local terrain';
     levelEl.textContent = view?.ready ? `${Math.round(view.triangles / 1000)}k` : '—';
     fpsEl.textContent = `${Math.round(view?.fps || fps)}`;
 
@@ -850,8 +853,11 @@ function updateHud(now) {
       statusEl.textContent = 'building 3D terrain';
       statusEl.classList.add('busy');
     } else {
-      statusEl.textContent = `3D ready · ${Math.round(view.generationMs)} ms`;
-      statusEl.classList.remove('busy');
+      const pending = stats?.pendingChunks ?? 0;
+      statusEl.textContent = pending > 0
+        ? `streaming ${stats.activeChunks} chunks · ${pending} pending`
+        : `3D ready · ${stats?.activeChunks ?? 0} chunks · ${Math.round(view.generationMs)} ms`;
+      statusEl.classList.toggle('busy', pending > 0);
     }
 
     compassEl.style.transform = `rotate(${view ? view.getHeading() : 0}rad)`;

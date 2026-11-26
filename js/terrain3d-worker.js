@@ -1,30 +1,24 @@
-// Worker entry for the 3D terrain mesh.
+// Worker entry for 3D terrain chunks.
 //
-// Sampling 37k elevation points is the one part of the 3D view that can stall a
-// frame, so it happens here and the typed arrays are transferred back.
+// Chunk generation is deterministic and CPU-heavy, so it runs here and typed
+// arrays are transferred back to the main thread.
 
-import { buildTerrainGrid } from './terrain3d-data.js';
+import { buildTerrainChunk, buildTerrainGrid } from './terrain3d-data.js';
 
 self.onmessage = (event) => {
-  const { id, ...options } = event.data || {};
+  const { id, kind = 'chunk', ...options } = event.data || {};
   try {
-    const data = buildTerrainGrid(options);
-    self.postMessage(
-      {
-        id,
-        positions: data.positions,
-        colors: data.colors,
-        indices: data.indices,
-        minHeight: data.minHeight,
-        maxHeight: data.maxHeight,
-        centerHeight: data.centerHeight,
-        segments: data.segments,
-        size: data.size,
-        heightScale: data.heightScale,
-        generationMs: data.generationMs,
-      },
-      [data.positions.buffer, data.colors.buffer, data.indices.buffer],
-    );
+    const data =
+      kind === 'grid' ? buildTerrainGrid(options) : buildTerrainChunk(options);
+    const transfer = [data.positions.buffer, data.colors.buffer, data.indices.buffer];
+    if (data.skirtPositions) {
+      transfer.push(
+        data.skirtPositions.buffer,
+        data.skirtColors.buffer,
+        data.skirtIndices.buffer,
+      );
+    }
+    self.postMessage({ id, epoch: options.epoch, ...data }, transfer);
   } catch (error) {
     self.postMessage({ id, error: String(error && error.message ? error.message : error) });
   }

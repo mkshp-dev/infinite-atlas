@@ -64,34 +64,34 @@ files appear on the next request.
 
 ## The 3D view
 
-The **3D** button (or `3`) opens a perspective view of the same world. It is a
-bounded local patch — 3 km across, up to 73k triangles (32k on phones) — not a
-planet renderer.
+The **3D** button (or `3`) opens a chunked perspective view of the same world.
+It is a local Cartesian terrain, not a planet renderer: chunks stream around the
+camera target as you pan.
 
 - **Same world, second renderer.** `js/world.js` is the rendering-independent
   world API (`elevationAt`, `moistureAt`, `biomeAt`, `colorAt`). The 2D atlas,
   the descent and the 3D mesh all read from it, so a seed and coordinate mean
-  the same thing everywhere.
-- **Generated off the main thread.** `js/terrain3d-worker.js` samples the
-  elevation and moisture fields into position/colour/index typed arrays and
-  transfers them back. A main-thread fallback keeps the view working if a
-  worker cannot start.
-- **A real mesh.** The grid is displaced by `(elevation - seaLevel) × 1250`,
-  vertex-coloured from the shared palette, given smooth normals and lit by a
-  seed-stable sun plus hemisphere fill. Distance fog and a sea-level water
-  plane give the patch depth, and a skirt closes the four cut edges.
-- **Bounded and disposable.** Leaving the view stops its render loop, terminates
-  the worker and disposes the geometry, materials and renderer. The 3D view owns
-  its own canvas, so the atlas and descent are never blocked by a 3D failure.
-- **Cost.** The mesh is a single draw call (32k triangles on phones, 73k on
-  desktop). Building it takes roughly 45–110 ms in the worker on the development
-  machine, so the patch appears within a fraction of a second and the main
-  thread never samples the grid. `tools/view3d-test.mjs` prints the generation
-  time and the measured frame rate.
-- **Controls.** Drag to orbit, scroll or pinch to dolly, double-click or `0` to
-  reset the camera. `M` or `3` returns to the atlas and the seed box rebuilds
-  the mesh around the new world's start. The status line reports the worker's
-  generation time and the 3D frame rate.
+  the same terrain everywhere.
+- **Deterministic chunks.** Each chunk identity is `(seed, chunkX, chunkY, lod)`
+  on a fixed world-space grid. Heights are sampled at absolute world coordinates,
+  so shared edges match regardless of generation order or LOD.
+- **LOD and streaming.** Nearby chunks use finer grids, distant chunks coarser
+  ones. Selection uses distance with hysteresis and enforces <=1 LOD difference
+  between adjacent chunks; edge stitching hides LOD T-junctions.
+- **Generated off the main thread.** `js/terrain3d-worker.js` builds per-chunk
+  typed arrays (positions, colours, indices, skirts, bounds) and returns
+  transferable buffers. Three.js objects are created/disposed only on the main
+  thread. A bounded main-thread fallback keeps it working without workers.
+- **Bounded and disposable.** Chunk generation has bounded worker concurrency,
+  stale-request ignoring, duplicate in-flight prevention, cache/eviction, and
+  GPU geometry/material disposal. Leaving 3D mode tears down renderer, workers,
+  and all chunk resources.
+- **Diagnostics.** The HUD/status reports active chunks, pending work, triangle
+  count, LOD mix, generation time, and FPS.
+
+**Controls.** Drag to orbit, right-drag/shift-drag to pan the terrain target,
+scroll or pinch to dolly, double-click or `0` to reset the camera. `M` or `3`
+returns to the atlas and the seed box rebuilds the 3D world around the new seed.
 
 ## Controls
 

@@ -46,6 +46,7 @@ async function stats(label) {
     if (positions) {
       for (let i = 1; i < positions.length; i += 997) signature += positions[i];
     }
+    const st = v?.stats;
     return {
       mode: s?.mode,
       seed: s?.seedText,
@@ -61,6 +62,10 @@ async function stats(label) {
       canvasHidden: document.querySelector('#terrain3d')?.hidden,
       mapVisibility: getComputedStyle(document.querySelector('#map')).visibility,
       hash: location.hash,
+      chunks: st?.activeChunks ?? 0,
+      pending: st?.pendingChunks ?? 0,
+      lod: st?.lodCounts?.slice(0, 3) ?? [],
+      center: v?.getCenter ? v.getCenter() : null,
     };
   });
   console.log(label, JSON.stringify(info));
@@ -180,10 +185,60 @@ console.log(
   shared.signature !== reloaded.signature,
 );
 
+// Pan target to stream new chunks.
+await page.setViewportSize({ width: 1440, height: 900 });
+await page.click('#mode-3d');
+await waitReady();
+const beforePan = await page.evaluate(() => {
+  const v = window.__atlas.state.view3d;
+  return { center: v.getCenter(), chunks: v.stats.activeChunks, pending: v.stats.pendingChunks, lod: v.stats.lodCounts.slice(0,3) };
+});
+await page.mouse.move(720, 450);
+await page.mouse.down({ button: 'right' });
+await page.mouse.move(1040, 560, { steps: 20 });
+await page.mouse.up({ button: 'right' });
+await page.waitForTimeout(1200);
+const afterPan = await page.evaluate(() => {
+  const v = window.__atlas.state.view3d;
+  return { center: v.getCenter(), chunks: v.stats.activeChunks, pending: v.stats.pendingChunks, lod: v.stats.lodCounts.slice(0,3) };
+});
+console.log('panned target:', Math.hypot(afterPan.center.x - beforePan.center.x, afterPan.center.y - beforePan.center.y) > 100,
+  '| chunks active:', afterPan.chunks > 0,
+  '| lod levels:', afterPan.lod);
+await shot('05-pan');
+
+// Deterministic chunk edge sampling and LOD/eviction diagnostics.
+const chunkCheck = await page.evaluate(async () => {
+  const mod = await import('./js/terrain3d-data.js');
+  const a = mod.buildTerrainChunk({ seed: 12345, cx: 0, cy: 0, lod: 0, chunkSize: 512, segments: 64, heightScale: 1250 });
+  const b = mod.buildTerrainChunk({ seed: 12345, cx: 1, cy: 0, lod: 0, chunkSize: 512, segments: 64, heightScale: 1250 });
+  const n = 65;
+  let edgeMatch = true;
+  for (let j = 0; j < n; j++) {
+    const ah = a.positions[(j * n + (n - 1)) * 3 + 1];
+    const bh = b.positions[(j * n + 0) * 3 + 1];
+    if (Math.abs(ah - bh) > 1e-6) { edgeMatch = false; break; }
+  }
+  const v = window.__atlas.state.view3d;
+  const stats = v.stats;
+  const lodDiffOk = (() => {
+    for (const c of v.chunks.values()) {
+      for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+        for (const o of v.chunks.values()) {
+          if (o.cx === c.cx + dx && o.cy === c.cy + dy && Math.abs(o.lod - c.lod) > 1) return false;
+        }
+      }
+    }
+    return true;
+  })();
+  return { edgeMatch, active: stats.activeChunks, pending: stats.pendingChunks, lod: stats.lodCounts.slice(0,3), lodDiffOk };
+});
+console.log('chunk edges deterministic:', chunkCheck.edgeMatch, '| lod diff <=1:', chunkCheck.lodDiffOk, '| stats:', chunkCheck.active, chunkCheck.pending, chunkCheck.lod);
+
 // Mobile.
 await page.setViewportSize({ width: 420, height: 820 });
 await page.waitForTimeout(900);
-await shot('05-mobile');
+await shot('06-mobile');
 
 console.log('--- errors ---');
 console.log(errors.length ? errors.join('\n') : '(none)');
