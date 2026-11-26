@@ -5,42 +5,14 @@
 // with whole-screen rectangles. Nothing is stored between calls, so the map is
 // infinite in every direction and identical for a given seed.
 
-import { clamp, lerp, smoothstep, fbm, valueNoise2, hash2i } from './noise.js';
+import { clamp, lerp, smoothstep, valueNoise2, hash2i } from './noise.js';
+import { SEA_LEVEL, elevationAt, moistureAt } from './world.js';
+
+// Keep the historical terrain.js exports working for the tile pipeline and the
+// preview tool while the shared world module owns the generation itself.
+export { SEA_LEVEL, elevationAt, moistureAt };
 
 export const TILE_SIZE = 256;
-export const SEA_LEVEL = 0.5;
-
-// Base wavelength of the continent shapes, in world units.
-const BASE_SCALE = 1050;
-
-// Elevation ------------------------------------------------------------------
-
-export function elevationAt(x, y, seed, octaves = 6) {
-  // A slow domain warp bends the coastline into bays and peninsulas instead of
-  // letting the noise lattice show through.
-  const wx = x + 340 * (valueNoise2(x / 2900, y / 2900, seed ^ 0x51ed) - 0.5);
-  const wy = y + 340 * (valueNoise2(x / 2900, y / 2900, seed ^ 0xa17e) - 0.5);
-
-  let e = fbm(wx / BASE_SCALE, wy / BASE_SCALE, seed, octaves);
-
-  // fBm is naturally low-contrast; stretch it so we get real lowlands and peaks.
-  e = 0.5 + (e - 0.5) * 1.75;
-  // Compress the upper range: highlands stay special instead of covering half
-  // the continent, which keeps the map green and the peaks worth reaching.
-  if (e > 0.5) {
-    const u = (e - 0.5) * 2;
-    e = 0.5 + 0.5 * u * Math.sqrt(u);
-  }
-  return clamp(e, 0, 1);
-}
-
-export function moistureAt(x, y, seed) {
-  // Two scales: broad climate belts plus local woodland/meadow patches.
-  const broad = fbm(x / 2600 + 31.7, y / 2600 - 12.3, seed ^ 0x6d2b, 3);
-  const local = fbm(x / 340 - 9.1, y / 340 + 4.4, seed ^ 0x3c91, 3);
-  const m = broad * 0.62 + local * 0.38;
-  return clamp(0.5 + (m - 0.5) * 2.1, 0, 1);
-}
 
 // Detail octaves follow the zoom level, so each pixel sees roughly the same
 // amount of structure and hill shading stays legible at every scale.

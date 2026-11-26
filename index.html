@@ -14,6 +14,7 @@
   </head>
   <body class="is-descent">
     <canvas id="map" role="application" aria-label="Infinite procedural terrain map"></canvas>
+    <canvas id="terrain3d" role="application" aria-label="3D terrain view" hidden></canvas>
     <div class="vignette" aria-hidden="true"></div>
 
     <aside class="panel" aria-label="World controls">
@@ -26,6 +27,7 @@
       <div class="mode-switch" role="group" aria-label="Experience">
         <button id="mode-descent" class="is-active" type="button" aria-pressed="true">descent</button>
         <button id="mode-atlas" type="button" aria-pressed="false">atlas</button>
+        <button id="mode-3d" type="button" aria-pressed="false">3D</button>
       </div>
 
       <div class="seed-row">
@@ -106,10 +108,10 @@
     </div>
 
     <svg class="compass" viewBox="0 0 48 48" aria-hidden="true">
-      <circle cx="24" cy="23" r="16" fill="none" stroke="currentColor" stroke-width="1" opacity="0.4" />
-      <path d="M24 9 L27.4 25.4 L24 23.2 L20.6 25.4 Z" fill="currentColor" />
-      <path d="M24 37 L20.6 25.4 L24 27.6 L27.4 25.4 Z" fill="currentColor" opacity="0.35" />
-      <text x="24" y="47" text-anchor="middle" font-size="6.5" letter-spacing="1.5" fill="currentColor">N</text>
+      <circle cx="24" cy="24" r="16" fill="none" stroke="currentColor" stroke-width="1" opacity="0.4" />
+      <path d="M24 8 L27.4 24.4 L24 22.2 L20.6 24.4 Z" fill="currentColor" />
+      <path d="M24 40 L20.6 24.4 L24 26.6 L27.4 24.4 Z" fill="currentColor" opacity="0.35" />
+      <text x="24" y="6.6" text-anchor="middle" font-size="6.5" letter-spacing="1.5" fill="currentColor">N</text>
     </svg>
 
     <p class="hint" id="hint">

@@ -38,8 +38,11 @@ const hintEl = $('hint');
 const viewSwitch = $('view-switch');
 const modeDescentBtn = $('mode-descent');
 const modeAtlasBtn = $('mode-atlas');
+const mode3dBtn = $('mode-3d');
+const canvas3d = $('terrain3d');
 const viewThirdBtn = $('view-third');
 const viewFirstBtn = $('view-first');
+const compassEl = document.querySelector('.compass');
 
 const ADJECTIVES = ['quiet', 'amber', 'hollow', 'frost', 'ember', 'salt', 'moss', 'pale', 'wild', 'dusk', 'iron', 'glass', 'slow', 'north', 'burnt', 'silver'];
 const NOUNS = ['harbor', 'ridge', 'marsh', 'delta', 'basin', 'vale', 'reach', 'strand', 'mesa', 'fen', 'cove', 'field', 'isles', 'point', 'creek', 'heath'];
@@ -71,14 +74,17 @@ function startScale() {
 }
 
 // Descent is the default experience: a parachutist drifts down and the world
-// resolves as the altitude drops. Atlas is the original free-roam view.
-const startMode = params.get('mode') === 'atlas' ? 'atlas' : 'descent';
+// resolves as the altitude drops. Atlas is the original free-roam view, and 3D
+// is a separate bounded terrain renderer over the same world.
+const requestedMode = params.get('mode');
+const startMode =
+  requestedMode === 'atlas' ? 'atlas' : requestedMode === '3d' ? '3d' : 'descent';
 const startView = params.get('view') === 'first' ? 'first' : 'third';
 
 const start = hasView
   ? { x: urlX, y: urlY, scale: clamp(urlZ, MIN_SCALE, MAX_SCALE) }
   : (() => {
-      const spot = findStart(seed, START_VIEW_WORLD, startMode === 'descent');
+      const spot = findStart(seed, START_VIEW_WORLD, startMode !== 'atlas');
       return { x: spot.x, y: spot.y, scale: startScale() };
     })();
 
@@ -110,6 +116,9 @@ const state = {
   options: { shading: true, contours: true, grain: true },
   level: 0,
   landed: descent.landed,
+  // The 3D view is created lazily and owns its own canvas and render loop.
+  view3d: null,
+  view3dStatus: 'idle',
   // Hold the drop until the opening view has tiles, so the first thing seen is
   // the world at 1×, then the descent begins.
   dropping: false,
@@ -203,19 +212,27 @@ function pointerSteer() {
 
 const HINTS = {
   descent:
-    'drag or <kbd>WASD</kbd> to steer · <kbd>shift</kbd> dive · <kbd>V</kbd> view · <kbd>M</kbd> atlas · <kbd>0</kbd> drop again',
+    'drag or <kbd>WASD</kbd> to steer · <kbd>shift</kbd> dive · <kbd>V</kbd> view · <kbd>M</kbd> atlas · <kbd>3</kbd> 3D · <kbd>0</kbd> drop again',
   atlas:
-    'drag to pan · scroll to zoom · <kbd>WASD</kbd> move · <kbd>R</kbd> new world · <kbd>0</kbd> reset · <kbd>M</kbd> descent',
+    'drag to pan · scroll to zoom · <kbd>WASD</kbd> move · <kbd>R</kbd> new world · <kbd>0</kbd> reset · <kbd>3</kbd> 3D · <kbd>M</kbd> descent',
+  three:
+    'drag to orbit · scroll or pinch to zoom · <kbd>M</kbd> or <kbd>3</kbd> atlas · <kbd>0</kbd> reset camera',
 };
 
 function syncModeUi() {
   const descending = state.mode === 'descent';
+  const is3d = state.mode === '3d';
+
   document.body.classList.toggle('is-descent', descending);
+  document.body.classList.toggle('is-3d', is3d);
+  canvas3d.hidden = !is3d;
 
   modeDescentBtn.classList.toggle('is-active', descending);
-  modeAtlasBtn.classList.toggle('is-active', !descending);
+  modeAtlasBtn.classList.toggle('is-active', state.mode === 'atlas');
+  mode3dBtn.classList.toggle('is-active', is3d);
   modeDescentBtn.setAttribute('aria-pressed', String(descending));
-  modeAtlasBtn.setAttribute('aria-pressed', String(!descending));
+  modeAtlasBtn.setAttribute('aria-pressed', String(state.mode === 'atlas'));
+  mode3dBtn.setAttribute('aria-pressed', String(is3d));
 
   viewSwitch.hidden = !descending;
   const first = state.view === 'first';
@@ -224,21 +241,98 @@ function syncModeUi() {
   viewThirdBtn.setAttribute('aria-pressed', String(!first));
   viewFirstBtn.setAttribute('aria-pressed', String(first));
 
-  hintEl.innerHTML = descending ? HINTS.descent : HINTS.atlas;
-  $('reset').title = descending
-    ? 'Drop again from the start (0)'
-    : 'Return to the starting view (0)';
+  hintEl.innerHTML = is3d ? HINTS.three : descending ? HINTS.descent : HINTS.atlas;
+  $('reset').title = is3d
+    ? 'Return the 3D camera to the start (0)'
+    : descending
+      ? 'Drop again from the start (0)'
+      : 'Return to the starting view (0)';
+  canvas.setAttribute('aria-hidden', String(is3d));
   canvas.setAttribute(
     'aria-label',
     descending
       ? 'Infinite procedural terrain, parachute descent'
       : 'Infinite procedural terrain map',
   );
+  canvas3d.setAttribute('aria-label', '3D terrain of the procedural world');
+}
+
+// The Three.js bundle is loaded only when the 3D view is first opened, so the
+// atlas and descent keep their fast start.
+let view3dPromise = null;
+
+async function enter3d() {
+  state.view3dStatus = 'building';
+  if (state.view3d) {
+    state.view3d.setWorld(state.seed, state.cam.x, state.cam.y);
+    state.view3d.start();
+    return;
+  }
+
+  if (!view3dPromise) view3dPromise = import('./view3d.js');
+  let module;
+  try {
+    module = await view3dPromise;
+  } catch (error) {
+    view3dPromise = null;
+    console.error('Could not load the 3D view:', error);
+    state.view3dStatus = 'error';
+    toast('3D view unavailable');
+    return;
+  }
+
+  // The person may have left while the module was loading.
+  if (state.mode !== '3d' || state.view3d) return;
+
+  try {
+    state.view3d = new module.TerrainView3D({
+      canvas: canvas3d,
+      seed: state.seed,
+      centerX: state.cam.x,
+      centerY: state.cam.y,
+      onStatus: (status) => {
+        state.view3dStatus = status;
+      },
+    });
+  } catch (error) {
+    console.error('Could not start the 3D view:', error);
+    state.view3dStatus = 'error';
+    toast('3D view unavailable');
+  }
+}
+
+function leave3d() {
+  if (!state.view3d) return;
+  const center = state.view3d.getCenter();
+  state.cam.x = center.x;
+  state.cam.y = center.y;
+  state.target.x = center.x;
+  state.target.y = center.y;
+  state.target.scale = state.cam.scale;
+  state.view3d.dispose();
+  state.view3d = null;
+  state.view3dStatus = 'idle';
 }
 
 function setMode(mode) {
   if (mode === state.mode) return;
 
+  if (mode === '3d') {
+    // Center the 3D patch on the subject, not on the mobile camera offset.
+    if (state.mode === 'descent') {
+      state.cam.x = state.descent.x;
+      state.cam.y = state.descent.y;
+    }
+    state.mode = '3d';
+    syncModeUi();
+    flash();
+    toast('3D terrain');
+    updateHash(true);
+    enter3d();
+    return;
+  }
+
+  leave3d();
   if (mode === 'descent') {
     // Climb back to the top and drop over wherever the atlas was left.
     state.descent.seed = state.seed;
@@ -282,8 +376,16 @@ function applySeed(text) {
   seedInput.blur();
   document.title = `Infinite Atlas — ${trimmed}`;
 
-  const spot = findStart(state.seed, START_VIEW_WORLD, state.mode === 'descent');
-  if (state.mode === 'descent') {
+  const spot = findStart(state.seed, START_VIEW_WORLD, state.mode !== 'atlas');
+  if (state.mode === '3d') {
+    state.cam.x = spot.x;
+    state.cam.y = spot.y;
+    state.target.x = spot.x;
+    state.target.y = spot.y;
+    state.target.scale = state.cam.scale;
+    if (state.view3d) state.view3d.setWorld(state.seed, spot.x, spot.y);
+    else enter3d();
+  } else if (state.mode === 'descent') {
     state.descent.seed = state.seed;
     state.descent.reset(spot.x, spot.y, START_ALTITUDE);
     state.landed = false;
@@ -299,6 +401,11 @@ function applySeed(text) {
 }
 
 function resetView() {
+  if (state.mode === '3d') {
+    state.view3d?.resetCamera();
+    flash();
+    return;
+  }
   const spot = findStart(state.seed, START_VIEW_WORLD, state.mode === 'descent');
   if (state.mode === 'descent') {
     state.descent.reset(spot.x, spot.y, START_ALTITUDE);
@@ -326,7 +433,7 @@ function updateHash(force = false) {
   next.set('view', state.view);
   next.set('x', (state.mode === 'descent' ? state.descent.x : state.cam.x).toFixed(1));
   next.set('y', (state.mode === 'descent' ? state.descent.y : state.cam.y).toFixed(1));
-  next.set('z', state.cam.scale.toFixed(3));
+  next.set('z', (state.mode === '3d' ? 1 : state.cam.scale).toFixed(3));
   const hash = `#${next.toString()}`;
   if (location.hash !== hash) history.replaceState(null, '', hash);
 }
@@ -470,7 +577,9 @@ window.addEventListener('keydown', (event) => {
   } else if (key === '0') {
     resetView();
   } else if (key === 'm') {
-    setMode(state.mode === 'descent' ? 'atlas' : 'descent');
+    setMode(state.mode === 'atlas' ? 'descent' : 'atlas');
+  } else if (key === '3') {
+    setMode(state.mode === '3d' ? 'atlas' : '3d');
   } else if (key === 'v') {
     if (state.mode === 'descent') setViewMode(state.view === 'first' ? 'third' : 'first');
   } else if (key === 'h') {
@@ -502,7 +611,8 @@ window.addEventListener('hashchange', () => {
   const y = parseFloat(next.get('y'));
   const z = parseFloat(next.get('z'));
   const hasSharedView = Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z);
-  const mode = next.get('mode') === 'atlas' ? 'atlas' : 'descent';
+  const requested = next.get('mode');
+  const mode = requested === 'atlas' ? 'atlas' : requested === '3d' ? '3d' : 'descent';
   const view = next.get('view') === 'first' ? 'first' : 'third';
 
   const seedChanged = text !== state.seedText;
@@ -514,11 +624,23 @@ window.addEventListener('hashchange', () => {
     engine?.configure({ seed: state.seed, options: state.options });
   }
 
+  if (mode !== '3d') leave3d();
   state.mode = mode;
   state.view = view;
+  // Unhide the 3D canvas before the renderer measures it.
+  syncModeUi();
 
-  if (mode === 'descent') {
-    const spot = hasSharedView ? { x, y } : findStart(state.seed, START_VIEW_WORLD, state.mode === 'descent');
+  if (mode === '3d') {
+    const spot = hasSharedView ? { x, y } : findStart(state.seed, START_VIEW_WORLD, true);
+    state.cam.x = spot.x;
+    state.cam.y = spot.y;
+    state.target.x = spot.x;
+    state.target.y = spot.y;
+    state.target.scale = state.cam.scale;
+    if (state.view3d) state.view3d.setWorld(state.seed, spot.x, spot.y);
+    else enter3d();
+  } else if (mode === 'descent') {
+    const spot = hasSharedView ? { x, y } : findStart(state.seed, START_VIEW_WORLD, true);
     const altitude = hasSharedView
       ? scaleToAltitude(clamp(z, MIN_SCALE, MAX_SCALE))
       : START_ALTITUDE;
@@ -530,11 +652,10 @@ window.addEventListener('hashchange', () => {
   } else if (hasSharedView) {
     setView(x, y, z);
   } else if (seedChanged) {
-    const spot = findStart(state.seed, START_VIEW_WORLD, state.mode === 'descent');
+    const spot = findStart(state.seed, START_VIEW_WORLD, false);
     setView(spot.x, spot.y, startScale());
   }
 
-  syncModeUi();
   flash();
 });
 
@@ -556,9 +677,11 @@ $('reset').addEventListener('click', resetView);
 
 modeDescentBtn.addEventListener('click', () => setMode('descent'));
 modeAtlasBtn.addEventListener('click', () => setMode('atlas'));
+mode3dBtn.addEventListener('click', () => setMode('3d'));
 viewThirdBtn.addEventListener('click', () => setViewMode('third'));
 viewFirstBtn.addEventListener('click', () => setViewMode('first'));
 syncModeUi();
+if (startMode === '3d') enter3d();
 
 for (const [id, option] of [
   ['opt-shading', 'shading'],
@@ -710,6 +833,33 @@ function updateHud(now) {
   if (now - lastHud < 140) return;
   lastHud = now;
 
+  if (state.mode === '3d') {
+    const view = state.view3d;
+    const center = view?.getCenter() || { x: state.cam.x, y: state.cam.y };
+    posEl.textContent = `${formatNumber.format(center.x)}, ${formatNumber.format(center.y)}`;
+    altEl.textContent = '—';
+    scaleEl.textContent = '3D';
+    scaleEl.title = 'bounded local terrain';
+    levelEl.textContent = view?.ready ? `${Math.round(view.triangles / 1000)}k` : '—';
+    fpsEl.textContent = `${Math.round(view?.fps || fps)}`;
+
+    if (state.view3dStatus === 'error' || view?.status === 'error') {
+      statusEl.textContent = '3D unavailable';
+      statusEl.classList.remove('busy');
+    } else if (!view || !view.ready) {
+      statusEl.textContent = 'building 3D terrain';
+      statusEl.classList.add('busy');
+    } else {
+      statusEl.textContent = `3D ready · ${Math.round(view.generationMs)} ms`;
+      statusEl.classList.remove('busy');
+    }
+
+    compassEl.style.transform = `rotate(${view ? view.getHeading() : 0}rad)`;
+    return;
+  }
+
+  compassEl.style.transform = '';
+
   posEl.textContent = `${formatNumber.format(state.cam.x)}, ${formatNumber.format(state.cam.y)}`;
   altEl.textContent =
     state.mode === 'descent' ? `${formatNumber.format(state.descent.altitude)} m` : '—';
@@ -755,7 +905,9 @@ function frame(now) {
 
   if (dt > 0) fps = fps * 0.92 + (1 / dt) * 0.08;
 
-  if (state.mode === 'descent') {
+  if (state.mode === '3d') {
+    // The 3D view owns its own render loop and canvas.
+  } else if (state.mode === 'descent') {
     const d = state.descent;
 
     // Wait for the opening view before letting gravity take over.
@@ -819,7 +971,7 @@ function frame(now) {
     }
   }
 
-  if (engine) render(now);
+  if (engine && state.mode !== '3d') render(now);
   updateHud(now);
   updateHash();
   requestAnimationFrame(frame);

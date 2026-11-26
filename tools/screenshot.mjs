@@ -57,9 +57,17 @@ await page.mouse.wheel(0, -700);
 await page.waitForTimeout(1500);
 await shot('05-atlas');
 
+await page.click('#mode-3d');
+await page.waitForFunction(() => window.__atlas?.state?.view3d?.ready === true, null, {
+  timeout: 30000,
+});
+await page.waitForTimeout(1200);
+await shot('06-3d');
+console.log('3D status:', await page.textContent('#status'));
+
 await page.setViewportSize({ width: 420, height: 820 });
 await page.waitForTimeout(1200);
-await shot('06-mobile');
+await shot('07-mobile');
 
 console.log('--- console ---');
 console.log(logs.join('\n') || '(none)');
