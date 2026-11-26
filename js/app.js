@@ -854,10 +854,12 @@ function updateHud(now) {
       statusEl.classList.add('busy');
     } else {
       const pending = stats?.pendingChunks ?? 0;
-      statusEl.textContent = pending > 0
-        ? `streaming ${stats.activeChunks} chunks · ${pending} pending`
-        : `3D ready · ${stats?.activeChunks ?? 0} chunks · ${Math.round(view.generationMs)} ms`;
-      statusEl.classList.toggle('busy', pending > 0);
+      const veg = stats?.vegetation;
+    const vegTxt = veg ? ` · ${veg.treeInstances} trees · ${veg.grassInstances} ground · ${veg.batches ?? 0} veg batches` : '';
+    statusEl.textContent = pending > 0
+      ? `streaming ${stats.activeChunks} chunks · ${pending} pending${vegTxt}`
+      : `3D ready · ${stats?.activeChunks ?? 0} chunks · ${Math.round(view.generationMs)} ms${vegTxt}`;
+    statusEl.classList.toggle('busy', pending > 0);
     }
 
     compassEl.style.transform = `rotate(${view ? view.getHeading() : 0}rad)`;

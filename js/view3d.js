@@ -6,6 +6,7 @@
 
 import * as THREE from '../vendor/three/three.module.min.js';
 import { buildTerrainChunk, chunkKey, TERRAIN3D_DEFAULTS } from './terrain3d-data.js';
+import { buildVegetationChunk } from './vegetation.js';
 
 const SKY = 0xb9cbc6;
 const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
@@ -82,9 +83,12 @@ export class TerrainView3D {
 
     this.group = new THREE.Group();
     this.scene.add(this.group);
+    this.vegetationGroup = new THREE.Group();
+    this.scene.add(this.vegetationGroup);
 
     this.#setupLights();
     this.#setupWater();
+    this.#setupVegetation();
     this.#bindEvents();
     this.resize();
     this.#updateCamera();
@@ -130,6 +134,134 @@ export class TerrainView3D {
     this.water.position.y = 0.02;
     this.water.renderOrder = 1;
     this.scene.add(this.water);
+  }
+
+  #setupVegetation() {
+    this.vegGeometries = this.#createVegetationGeometries();
+    this.vegMaterials = this.#createVegetationMaterials();
+    this.vegetationStats = { treeInstances: 0, grassInstances: 0, chunks: 0, generationMs: 0 };
+  }
+
+  #createVegetationGeometries() {
+    // Simple low-poly archetypes; instanced per chunk.
+    const broadleaf = new THREE.Group();
+    {
+      const trunk = new THREE.CylinderGeometry(0.22, 0.32, 3.2, 6);
+      trunk.translate(0, 1.6, 0);
+      const canopy = new THREE.IcosahedronGeometry(1.55, 1);
+      canopy.translate(0, 3.9, 0);
+      broadleaf.add(new THREE.Mesh(trunk), new THREE.Mesh(canopy));
+    }
+    const tall = new THREE.Group();
+    {
+      const trunk = new THREE.CylinderGeometry(0.16, 0.28, 4.8, 6);
+      trunk.translate(0, 2.4, 0);
+      const c1 = new THREE.ConeGeometry(1.1, 2.8, 7);
+      c1.translate(0, 4.4, 0);
+      const c2 = new THREE.ConeGeometry(0.85, 2.2, 7);
+      c2.translate(0, 5.7, 0);
+      tall.add(new THREE.Mesh(trunk), new THREE.Mesh(c1), new THREE.Mesh(c2));
+    }
+    const tropical = new THREE.Group();
+    {
+      const trunk = new THREE.CylinderGeometry(0.18, 0.3, 4.2, 6);
+      trunk.translate(0, 2.1, 0);
+      const canopy = new THREE.SphereGeometry(1.8, 7, 6);
+      canopy.scale(1.2, 0.75, 1.2);
+      canopy.translate(0, 4.7, 0);
+      tropical.add(new THREE.Mesh(trunk), new THREE.Mesh(canopy));
+    }
+    const small = new THREE.Group();
+    {
+      const trunk = new THREE.CylinderGeometry(0.14, 0.22, 2.2, 5);
+      trunk.translate(0, 1.1, 0);
+      const canopy = new THREE.SphereGeometry(1.0, 7, 6);
+      canopy.translate(0, 2.6, 0);
+      small.add(new THREE.Mesh(trunk), new THREE.Mesh(canopy));
+    }
+    const shrub = new THREE.SphereGeometry(0.65, 6, 5);
+    shrub.scale(1.1, 0.8, 1.1);
+    shrub.translate(0, 0.45, 0);
+    const grass = new THREE.ConeGeometry(0.28, 0.9, 5);
+    grass.translate(0, 0.45, 0);
+
+    const toBuffer = (obj, mats) => {
+      // obj is Group of meshes or a geometry
+      if (obj.isBufferGeometry) return { geometry: obj, materialKey: mats };
+      const geoms = [];
+      obj.children.forEach((m, i) => {
+        const g = m.geometry.clone();
+        g.applyMatrix4(m.matrix);
+        g.userData.materialKey = mats[i] || mats[0];
+        geoms.push(g);
+      });
+      // merge by material key into two geometries (trunk/canopy) - simple approach: keep separate by returning array
+      return geoms;
+    };
+
+    // Merge helpers
+    const merge = (parts) => {
+      // parts: [{geometry, materialKey}]
+      const byKey = new Map();
+      for (const p of parts) {
+        const k = p.materialKey;
+        if (!byKey.has(k)) byKey.set(k, []);
+        byKey.get(k).push(p.geometry);
+      }
+      const out = [];
+      for (const [k, gs] of byKey) {
+        const merged = mergeGeometries(gs);
+        gs.forEach(g => g.dispose());
+        out.push({ geometry: merged, materialKey: k });
+      }
+      return out;
+    };
+
+    // local merge to avoid importing BufferGeometryUtils
+    function mergeGeometries(geoms) {
+      let posCount = 0, idxCount = 0;
+      for (const g of geoms) { posCount += g.attributes.position.count; idxCount += g.index ? g.index.count : g.attributes.position.count; }
+      const pos = new Float32Array(posCount * 3);
+      const norm = new Float32Array(posCount * 3);
+      const idx = new Uint32Array(idxCount);
+      let pOff = 0, iOff = 0, vOff = 0;
+      for (const g of geoms) {
+        const p = g.attributes.position.array;
+        const n = g.attributes.normal?.array;
+        pos.set(p, pOff * 3);
+        if (n) norm.set(n, pOff * 3);
+        const gi = g.index?.array;
+        const gc = g.index ? g.index.count : g.attributes.position.count;
+        for (let i = 0; i < gc; i++) idx[iOff + i] = (gi ? gi[i] : i) + pOff;
+        pOff += g.attributes.position.count;
+        iOff += gc;
+      }
+      const bg = new THREE.BufferGeometry();
+      bg.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+      bg.setAttribute('normal', new THREE.BufferAttribute(norm, 3));
+      bg.setIndex(new THREE.BufferAttribute(idx, 1));
+      return bg;
+    }
+
+    const treeParts = (group, keys) => merge(group.children.map((m,i)=>({geometry: (()=>{const g=m.geometry.clone(); g.applyMatrix4(m.matrix); return g;})(), materialKey: keys[i] || keys[0]})));
+    return {
+      broadleaf: treeParts(broadleaf, ['trunk','canopy']),
+      tall: treeParts(tall, ['trunk','canopy','canopy']),
+      tropical: treeParts(tropical, ['trunk','canopy']),
+      small: treeParts(small, ['trunk','canopy']),
+      shrub: [{ geometry: shrub, materialKey: 'shrub' }],
+      grass: [{ geometry: grass, materialKey: 'grass' }],
+    };
+  }
+
+  #createVegetationMaterials() {
+    const mk = (color) => new THREE.MeshLambertMaterial({ color });
+    return {
+      trunk: mk(0x6a5138),
+      canopy: mk(0x4f7a3f),
+      shrub: mk(0x5f8447),
+      grass: mk(0x7b9852),
+    };
   }
 
   // --- Chunk management -----------------------------------------------------
@@ -376,7 +508,11 @@ export class TerrainView3D {
             heightScale: this.heightScale,
             skirtDepth: this.#skirtDepthForLod(job.lod),
           });
-          this.#applyChunk({ ...data, id: job.id, epoch: job.epoch });
+          const vegetation = buildVegetationChunk({
+            seed: job.seed, cx: job.cx, cy: job.cy,
+            chunkSize: this.chunkSize, heightScale: this.heightScale,
+          });
+          this.#applyChunk({ ...data, vegetation, id: job.id, epoch: job.epoch });
         } catch (error) {
           console.error('Chunk fallback failed:', error);
         }
@@ -492,10 +628,15 @@ export class TerrainView3D {
       centerHeight: data.centerHeight,
       mesh,
       skirt,
+      vegetation: null,
+      vegetationData: data.vegetation || null,
+      sourceData: data,
       lastUsed: performance.now(),
       triangles: geometry.index.count / 3 + (data.skirtIndices ? data.skirtIndices.length / 3 : 0),
     };
     this.chunks.set(key, chunk);
+    this.#rebuildNeighborEdges(chunk.cx, chunk.cy);
+    if (chunk.vegetationData) this.#applyVegetation(chunk, chunk.vegetationData);
     this.#recomputeBounds();
     this.ready = this.chunks.size > 0;
     this.status = this.ready ? 'ready' : 'building';
@@ -506,6 +647,7 @@ export class TerrainView3D {
     const chunk = this.chunks.get(key);
     if (!chunk) return;
     const { cx, cy } = chunk;
+    this.#disposeVegetation(chunk);
     for (const obj of [chunk.mesh, chunk.skirt]) {
       if (!obj) continue;
       this.group.remove(obj);
@@ -515,6 +657,99 @@ export class TerrainView3D {
     this.chunks.delete(key);
     this.evictedChunks += 1;
     this.#rebuildNeighborEdges(cx, cy);
+  }
+
+  #disposeVegetation(chunk) {
+    if (!chunk?.vegetation) return;
+    for (const mesh of chunk.vegetation.meshes) {
+      this.vegetationGroup.remove(mesh);
+      mesh.dispose();
+    }
+    chunk.vegetation = null;
+  }
+
+  #applyVegetation(chunk, vegetationData) {
+    this.#disposeVegetation(chunk);
+    if (!vegetationData?.instances) return;
+    const meshes = [];
+    let treeInstances = 0;
+    let grassInstances = 0;
+    const lodLevel = this.#vegetationLodForChunk(chunk);
+    for (const [type, arr] of Object.entries(vegetationData.instances)) {
+      const count = arr.length / 7;
+      if (count === 0) continue;
+      const filtered = [];
+      for (let i = 0; i < count; i++) {
+        const lodMask = arr[i * 7 + 6] || 0b111;
+        if (lodMask & (1 << lodLevel)) filtered.push(i);
+      }
+      if (filtered.length === 0) continue;
+      const parts = this.vegGeometries[type];
+      if (!parts) continue;
+      for (const part of parts) {
+        const mat = this.vegMaterials[part.materialKey];
+        const mesh = new THREE.InstancedMesh(part.geometry, mat, filtered.length);
+        mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        const dummy = new THREE.Object3D();
+        for (let j = 0; j < filtered.length; j++) {
+          const i = filtered[j];
+          const o = i * 7;
+          dummy.position.set(arr[o], arr[o + 1], arr[o + 2]);
+          dummy.rotation.set(0, arr[o + 4], 0);
+          const s = arr[o + 3];
+          dummy.scale.setScalar(s);
+          dummy.updateMatrix();
+          mesh.setMatrixAt(j, dummy.matrix);
+        }
+        mesh.instanceMatrix.needsUpdate = true;
+        mesh.frustumCulled = true;
+        mesh.userData.vegType = type;
+        mesh.userData.lodLevel = lodLevel;
+        this.vegetationGroup.add(mesh);
+        meshes.push(mesh);
+      }
+      if (type === 'grass' || type === 'shrub') grassInstances += filtered.length;
+      else treeInstances += filtered.length;
+    }
+    chunk.vegetation = { meshes, treeInstances, grassInstances, lodLevel, generationMs: vegetationData.generationMs || 0 };
+    this.#updateVegetationStats();
+  }
+
+  #vegetationLodForChunk(chunk) {
+    const centerX = (chunk.cx + 0.5) * this.chunkSize;
+    const centerY = (chunk.cy + 0.5) * this.chunkSize;
+    const d = Math.hypot(centerX - this.target.x, centerY - this.target.z);
+    if (d <= this.chunkSize * 2.2) return 0; // near
+    if (d <= this.chunkSize * 4.5) return 1; // mid
+    return 2; // far
+  }
+
+  #updateVegetationLods() {
+    let changed = false;
+    for (const chunk of this.chunks.values()) {
+      if (!chunk.vegetationData) continue;
+      const lodLevel = this.#vegetationLodForChunk(chunk);
+      if (chunk.vegetation?.lodLevel === lodLevel) continue;
+      this.#applyVegetation(chunk, chunk.vegetationData);
+      changed = true;
+    }
+    if (changed) this.#updateVegetationStats();
+  }
+
+  #updateVegetationStats() {
+    let treeInstances = 0, grassInstances = 0, chunks = 0, generationMs = 0, batches = 0;
+    const lodDist = [0, 0, 0];
+    for (const c of this.chunks.values()) {
+      if (!c.vegetation) continue;
+      chunks++;
+      treeInstances += c.vegetation.treeInstances;
+      grassInstances += c.vegetation.grassInstances;
+      generationMs += c.vegetation.generationMs || 0;
+      batches += c.vegetation.meshes.length;
+      lodDist[c.vegetation.lodLevel || 0] += c.vegetation.treeInstances + c.vegetation.grassInstances;
+    }
+    const approxMemoryMB = ((treeInstances + grassInstances) * 64) / (1024 * 1024); // rough instance matrix+overhead
+    this.vegetationStats = { treeInstances, grassInstances, chunks, generationMs, batches, lodDist, approxMemoryMB };
   }
 
   #evictIfNeeded(wanted) {
@@ -584,6 +819,7 @@ export class TerrainView3D {
       generationMs: this.lastGenerationMs,
       evictedChunks: this.evictedChunks,
       completedJobs: this.completedJobs,
+      vegetation: this.vegetationStats || { treeInstances: 0, grassInstances: 0, chunks: 0, generationMs: 0 },
     };
   }
 
@@ -749,6 +985,8 @@ export class TerrainView3D {
       if (dt > 0) this.fps = this.fps * 0.92 + (1 / dt) * 0.08;
       this.#updateCamera();
       this.#refreshChunks();
+      this._vegLodTick = (this._vegLodTick || 0) + 1;
+      if (this._vegLodTick % 30 === 0) this.#updateVegetationLods();
       this.renderer.render(this.scene, this.camera);
       this.raf = requestAnimationFrame(tick);
     };
@@ -780,6 +1018,8 @@ export class TerrainView3D {
     this.canvas.removeEventListener('contextmenu', this.onContextMenu);
 
     for (const key of Array.from(this.chunks.keys())) this.#disposeChunk(key);
+    for (const g of Object.values(this.vegGeometries || {})) for (const p of g) p.geometry.dispose();
+    for (const m of Object.values(this.vegMaterials || {})) m.dispose();
     this.water?.geometry.dispose();
     this.water?.material.dispose();
     this.water = null;

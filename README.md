@@ -82,12 +82,16 @@ camera target as you pan.
   typed arrays (positions, colours, indices, skirts, bounds) and returns
   transferable buffers. Three.js objects are created/disposed only on the main
   thread. A bounded main-thread fallback keeps it working without workers.
+- **Procedural vegetation.** Trees, shrubs and ground cover are placed
+  deterministically per terrain chunk from biome/elevation/moisture/slope rules.
+  Instances are rendered with `InstancedMesh`, use distance-based LOD/density
+  reduction, and are disposed/cached with their chunk lifecycle.
 - **Bounded and disposable.** Chunk generation has bounded worker concurrency,
   stale-request ignoring, duplicate in-flight prevention, cache/eviction, and
   GPU geometry/material disposal. Leaving 3D mode tears down renderer, workers,
-  and all chunk resources.
+  terrain and vegetation resources.
 - **Diagnostics.** The HUD/status reports active chunks, pending work, triangle
-  count, LOD mix, generation time, and FPS.
+  count, LOD mix, vegetation counts/batches, generation time, and FPS.
 
 **Controls.** Drag to orbit, right-drag/shift-drag to pan the terrain target,
 scroll or pinch to dolly, double-click or `0` to reset the camera. `M` or `3`

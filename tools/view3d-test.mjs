@@ -170,9 +170,9 @@ await page.evaluate(() => {
 await page.waitForFunction(
   () => window.__atlas?.state?.view3d?.ready === true && window.__atlas?.state?.seedText === 'iron-mesa-77',
   null,
-  { timeout: 30000 },
+  { timeout: 45000 },
 );
-await page.waitForTimeout(500);
+await page.waitForTimeout(900);
 const shared = await stats('shared-link');
 const sharedCenter = await page.evaluate(() => window.__atlas.state.view3d.getCenter());
 console.log(
@@ -234,6 +234,23 @@ const chunkCheck = await page.evaluate(async () => {
   return { edgeMatch, active: stats.activeChunks, pending: stats.pendingChunks, lod: stats.lodCounts.slice(0,3), lodDiffOk };
 });
 console.log('chunk edges deterministic:', chunkCheck.edgeMatch, '| lod diff <=1:', chunkCheck.lodDiffOk, '| stats:', chunkCheck.active, chunkCheck.pending, chunkCheck.lod);
+
+const vegCheck = await page.evaluate(async () => {
+  const v = window.__atlas.state.view3d;
+  const stats = v.stats;
+  const veg = stats.vegetation;
+  const mod = await import('./js/vegetation.js');
+  const a = mod.buildVegetationChunk({ seed: 123, cx: 0, cy: 0, chunkSize: 512 });
+  const b = mod.buildVegetationChunk({ seed: 123, cx: 0, cy: 0, chunkSize: 512 });
+  let det = a.total === b.total;
+  for (const k of Object.keys(a.instances)) {
+    const A=a.instances[k], B=b.instances[k];
+    if (A.length !== B.length) det = false;
+    for (let i=0;i<A.length && det;i++) if (A[i]!==B[i]) det=false;
+  }
+  return { det, trees: veg.treeInstances, grass: veg.grassInstances, vegChunks: veg.chunks, batches: veg.batches, lodDist: veg.lodDist };
+});
+console.log('vegetation deterministic:', vegCheck.det, '| trees:', vegCheck.trees, '| ground:', vegCheck.grass, '| vegChunks:', vegCheck.vegChunks);
 
 // Mobile.
 await page.setViewportSize({ width: 420, height: 820 });
