@@ -8,21 +8,27 @@ import * as THREE from '../vendor/three/three.module.min.js';
 import { buildTerrainChunk, chunkKey, TERRAIN3D_DEFAULTS } from './terrain3d-data.js';
 import { buildVegetationChunk } from './vegetation.js';
 import { SEA_LEVEL, elevationAt } from './world.js';
+import { valueNoise2 } from './noise.js';
 
 const SKY = 0xb9cbc6;
 const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
+const smoothstep = (a, b, v) => {
+  const t = clamp((v - a) / (b - a), 0, 1);
+  return t * t * (3 - 2 * t);
+};
 
 function makeWorker() {
   return new Worker(new URL('./terrain3d-worker.js', import.meta.url), { type: 'module' });
 }
 
 export class TerrainView3D {
-  constructor({ canvas, seed, centerX, centerY, onStatus }) {
+  constructor({ canvas, seed, centerX, centerY, onStatus, onDescent }) {
     this.canvas = canvas;
     this.seed = seed;
     this.centerX = centerX;
     this.centerY = centerY;
     this.onStatus = onStatus;
+    this.onDescent = onDescent;
 
     this.chunkSize = TERRAIN3D_DEFAULTS.chunkSize;
     this.lodSegments = TERRAIN3D_DEFAULTS.lodSegments;
@@ -44,6 +50,31 @@ export class TerrainView3D {
     this.pitch = 0.62;
     this.distance = this.chunkSize * 2.8;
     this.target = new THREE.Vector3(centerX, 0, centerY);
+
+    // Parachute descent state. While active the camera is a first-person eye
+    // above the ground, drifting with wind and steering, and the chunk ring is
+    // clipped to the forward cone the subject can actually see.
+    this.descent = {
+      active: false,
+      landed: false,
+      x: centerX,
+      z: centerY,
+      startX: centerX,
+      startZ: centerY,
+      altitude: 0,
+      startAltitude: 0,
+      groundY: 0,
+      yaw: 0.72,
+      baseYaw: 0.72,
+      pitch: -0.55,
+      maxYaw: 0.85,
+      vx: 0,
+      vz: 0,
+      time: 0,
+      windAngle: 0,
+      windStrength: 8,
+      input: { x: 0, y: 0, dive: false },
+    };
 
     this.pointers = new Map();
     this.lastPinch = 0;
@@ -90,6 +121,7 @@ export class TerrainView3D {
     this.#setupLights();
     this.#setupWater();
     this.#setupVegetation();
+    this.#setupClouds();
     this.#bindEvents();
     this.resize();
     this.#updateCamera();
@@ -135,6 +167,100 @@ export class TerrainView3D {
     this.water.position.y = 0.02;
     this.water.renderOrder = 1;
     this.scene.add(this.water);
+  }
+
+  // Soft procedural cloud sheet. No external image: a small canvas is filled
+  // with wrapped radial blobs and repeated across a few horizontal layers.
+  #makeCloudTexture() {
+    const size = 256;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    let state = (this.seed >>> 0) || 1;
+    const rand = () => {
+      state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+      return state / 4294967296;
+    };
+    for (let i = 0; i < 26; i++) {
+      const x = rand() * size;
+      const y = rand() * size;
+      const radius = 16 + rand() * 44;
+      for (let ox = -1; ox <= 1; ox++) {
+        for (let oy = -1; oy <= 1; oy++) {
+          const cx = x + ox * size;
+          const cy = y + oy * size;
+          const gradient = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
+          gradient.addColorStop(0, 'rgba(255,255,255,0.5)');
+          gradient.addColorStop(0.55, 'rgba(255,255,255,0.2)');
+          gradient.addColorStop(1, 'rgba(255,255,255,0)');
+          ctx.fillStyle = gradient;
+          ctx.beginPath();
+          ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.RepeatWrapping;
+    texture.repeat.set(2.4, 2.4);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    return texture;
+  }
+
+  #setupClouds() {
+    this.cloudTexture = this.#makeCloudTexture();
+    this.cloudGroup = new THREE.Group();
+    const size = this.chunkSize * 26;
+    for (const [index, altitude] of [170, 340, 540].entries()) {
+      const geometry = new THREE.PlaneGeometry(size, size, 1, 1);
+      geometry.rotateX(-Math.PI / 2);
+      const material = new THREE.MeshBasicMaterial({
+        map: this.cloudTexture,
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        fog: false,
+      });
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.userData.altitude = altitude;
+      mesh.userData.drift = 0.0015 + index * 0.0008;
+      mesh.renderOrder = 2;
+      mesh.frustumCulled = false;
+      this.cloudGroup.add(mesh);
+    }
+    this.cloudGroup.visible = false;
+    this.scene.add(this.cloudGroup);
+  }
+
+  #updateClouds(dt) {
+    if (!this.cloudGroup) return;
+    const d = this.descent;
+    const altitude = d.active
+      ? d.altitude
+      : Math.max(0, this.camera.position.y - this.target.y);
+    // Cloud sheets belong to the canopy experience; free roam stays clear.
+    this.cloudGroup.visible = d.active && altitude > 45;
+    if (!this.cloudGroup.visible) return;
+    let anyVisible = false;
+    for (const mesh of this.cloudGroup.children) {
+      const rel = altitude - mesh.userData.altitude;
+      // Each sheet is a band the subject passes through: it fades in just
+      // above the eye, peaks while the camera is inside the layer, and is gone
+      // once the camera has dropped well below it. Only one band is strong at
+      // a time, so the veil never stacks into white-out.
+      const rise = smoothstep(15, 55, rel);
+      const fall = 1 - smoothstep(160, 320, rel);
+      const opacity = 0.15 * rise * fall;
+      mesh.material.opacity = opacity;
+      mesh.visible = opacity > 0.005;
+      anyVisible = anyVisible || mesh.visible;
+      mesh.position.set(this.target.x, this.target.y + mesh.userData.altitude, this.target.z);
+      mesh.rotation.y += dt * mesh.userData.drift;
+    }
+    this.cloudGroup.visible = anyVisible;
   }
 
   #setupVegetation() {
@@ -242,6 +368,29 @@ export class TerrainView3D {
 
   // --- Chunk management -----------------------------------------------------
 
+  // In descent the visible disc shrinks as the subject nears the ground: the
+  // horizon is closer, the fog closes in and the chunk ring can be smaller.
+  // This is the 3D version of the 2D descent's altitude -> zoom rule.
+  #activeRadius() {
+    if (!this.descent.active) return this.visibleRadius;
+    const altitude = this.descent.altitude;
+    const radius = Math.ceil(2 + (altitude / this.chunkSize) * 3.2);
+    return clamp(radius, 2, this.visibleRadius);
+  }
+
+  #updateFog() {
+    if (!this.scene.fog) return;
+    if (!this.descent.active) {
+      this.scene.fog.near = this.chunkSize * 3.2;
+      this.scene.fog.far = this.chunkSize * 11;
+      return;
+    }
+    const radius = this.#activeRadius();
+    const far = radius * this.chunkSize * 1.15;
+    this.scene.fog.near = far * 0.34;
+    this.scene.fog.far = far;
+  }
+
   #desiredLod(distance) {
     if (distance <= this.chunkSize * 1.35) return 0;
     if (distance <= this.chunkSize * 2.8) return Math.min(1, this.maxLod);
@@ -258,15 +407,17 @@ export class TerrainView3D {
     const targetChunkX = Math.floor(this.target.x / this.chunkSize);
     const targetChunkY = Math.floor(this.target.z / this.chunkSize);
 
+    const radius = this.#activeRadius();
     const wanted = new Map();
-    for (let dy = -this.visibleRadius; dy <= this.visibleRadius; dy++) {
-      for (let dx = -this.visibleRadius; dx <= this.visibleRadius; dx++) {
+    for (let dy = -radius; dy <= radius; dy++) {
+      for (let dx = -radius; dx <= radius; dx++) {
         const cx = targetChunkX + dx;
         const cy = targetChunkY + dy;
         const centerX = (cx + 0.5) * this.chunkSize;
         const centerY = (cy + 0.5) * this.chunkSize;
         const distance = Math.hypot(centerX - this.target.x, centerY - this.target.z);
-        if (distance > this.visibleRadius * this.chunkSize * 1.08) continue;
+        if (distance > radius * this.chunkSize * 1.08) continue;
+        if (!this.#inDescentView(cx, cy, distance)) continue;
         let lod = this.#desiredLod(distance);
         const existing = this.#getExistingChunk(cx, cy);
         if (existing) {
@@ -328,6 +479,19 @@ export class TerrainView3D {
     }
     this.queue.sort((a, b) => a.priority - b.priority);
     this.#pumpQueue();
+
+    // Shrinking the ring on the way down should actually free the far chunks,
+    // not just stop asking for them. They are already almost fully fogged.
+    if (this.descent.active) {
+      const cull = radius * this.chunkSize * 1.15;
+      for (const chunk of Array.from(this.chunks.values())) {
+        const cx = (chunk.cx + 0.5) * this.chunkSize;
+        const cy = (chunk.cy + 0.5) * this.chunkSize;
+        if (Math.hypot(cx - this.target.x, cy - this.target.z) > cull) {
+          this.#disposeChunk(chunk.key);
+        }
+      }
+    }
 
     this.#evictIfNeeded(wantedByKey);
     this.#updateStatus(force);
@@ -442,8 +606,9 @@ export class TerrainView3D {
     const dx = (cx + 0.5) * this.chunkSize - this.target.x;
     const dz = (cy + 0.5) * this.chunkSize - this.target.z;
     const length = Math.hypot(dx, dz) || 1;
-    const forwardX = -Math.sin(this.yaw);
-    const forwardZ = -Math.cos(this.yaw);
+    const descent = this.descent.active;
+    const forwardX = descent ? Math.sin(this.yaw) : -Math.sin(this.yaw);
+    const forwardZ = descent ? Math.cos(this.yaw) : -Math.cos(this.yaw);
     const dot = (dx * forwardX + dz * forwardZ) / length;
     return -dot * this.chunkSize * 0.75;
   }
@@ -750,9 +915,12 @@ export class TerrainView3D {
     const centerY = (chunk.cy + 0.5) * this.chunkSize;
     const d = Math.hypot(centerX - this.target.x, centerY - this.target.z);
     const altitude = Math.max(this.chunkSize * 0.3, this.camera.position.y - this.target.y);
-    const near = altitude * 1.4;
-    const mid = altitude * 3.0;
-    const pad = altitude * 0.14;
+    // The full-detail band always covers at least the chunk under the camera,
+    // then grows slowly with height. Scaling it straight off altitude made the
+    // foreground lose detail exactly as the camera dropped towards it.
+    const near = this.chunkSize * 0.9 + altitude * 0.25;
+    const mid = this.chunkSize * 2.0 + altitude * 0.6;
+    const pad = Math.max(48, altitude * 0.12);
     const current = chunk.vegetation?.lodLevel;
     if (current === 0) {
       if (d > mid + pad) return 2;
@@ -880,9 +1048,11 @@ export class TerrainView3D {
       triangleCount: this.triangles,
       lodCounts,
       generationMs: this.lastGenerationMs,
+      radius: this.#activeRadius(),
       evictedChunks: this.evictedChunks,
       completedJobs: this.completedJobs,
       vegetation: this.vegetationStats || { treeInstances: 0, groundInstances: 0, chunks: 0, generationMs: 0, batches: 0, lodDist: [0, 0, 0], approxMemoryMB: 0 },
+      descent: this.getDescent(),
     };
   }
 
@@ -890,6 +1060,8 @@ export class TerrainView3D {
 
   setWorld(seed, centerX, centerY) {
     this.seed = seed;
+    this.descent.active = false;
+    this.descent.landed = false;
     this.epoch += 1;
     this.queue = [];
     this.inFlight.clear();
@@ -906,10 +1078,12 @@ export class TerrainView3D {
   }
 
   resetCamera() {
+    if (this.descent.active) this.stopDescent();
     this.yaw = 0.72;
     this.pitch = 0.62;
     this.distance = this.chunkSize * 2.8;
     this.#updateCamera();
+    this.#refreshChunks(true);
   }
 
   #groundHeight(x, z) {
@@ -935,6 +1109,9 @@ export class TerrainView3D {
   }
 
   panTargetByPixels(dx, dy) {
+    // The canopy view has no free pan: the subject can look around inside a
+    // cone and steer the drift, but cannot slide the whole world sideways.
+    if (this.descent.active) return;
     // Move target in ground plane relative to camera yaw.
     const panScale = this.distance * 0.0015;
     const cos = Math.cos(this.yaw);
@@ -952,6 +1129,156 @@ export class TerrainView3D {
   getHeading() { return this.yaw; }
   getCenter() { return { x: this.target.x, y: this.target.z }; }
   getCameraTarget() { return { x: this.target.x, y: this.target.z }; }
+
+  // --- Parachute descent ----------------------------------------------------
+
+  getDescent() {
+    const d = this.descent;
+    return {
+      active: d.active,
+      landed: d.landed,
+      altitude: d.altitude,
+      startAltitude: d.startAltitude,
+      x: d.x,
+      y: d.z,
+      groundY: d.groundY,
+      yaw: d.yaw,
+      baseYaw: d.baseYaw,
+      maxYaw: d.maxYaw,
+    };
+  }
+
+  setDescentInput(input = {}) {
+    this.descent.input = {
+      x: clamp(Number(input.x) || 0, -1, 1),
+      y: clamp(Number(input.y) || 0, -1, 1),
+      dive: Boolean(input.dive),
+    };
+  }
+
+  startDescent({ x, y, altitude = 640 } = {}) {
+    const d = this.descent;
+    const startX = Number.isFinite(x) ? x : this.target.x;
+    const startZ = Number.isFinite(y) ? y : this.target.z;
+    d.active = true;
+    d.landed = false;
+    d.x = startX;
+    d.z = startZ;
+    d.startX = startX;
+    d.startZ = startZ;
+    d.altitude = Math.max(60, Number(altitude) || 640);
+    d.startAltitude = d.altitude;
+    d.groundY = this.#groundHeight(startX, startZ);
+    // Orbit forward is (-sin(yaw), -cos(yaw)); the canopy looks along
+    // (+sin, +cos), so add half a turn to keep the view continuous.
+    d.baseYaw = this.yaw + Math.PI;
+    d.yaw = d.baseYaw;
+    d.pitch = -0.55;
+    d.vx = 0;
+    d.vz = 0;
+    d.time = 0;
+    d.windAngle = ((this.seed >>> 0) % 6283) / 1000;
+    d.windStrength = 8;
+    d.input = { x: 0, y: 0, dive: false };
+    this.target.set(startX, d.groundY, startZ);
+    this.#updateDescentCamera(0);
+    this.#refreshChunks(true);
+    this.#updateStatus(true);
+    this.onDescent?.({ type: 'start', ...this.getDescent() });
+  }
+
+  stopDescent({ land = false } = {}) {
+    const d = this.descent;
+    if (!d.active && !d.landed) return;
+    const wasActive = d.active;
+    d.active = false;
+    d.landed = Boolean(land);
+    this.target.set(d.x, this.#groundHeight(d.x, d.z), d.z);
+    // Orbit yaw places the camera opposite its forward direction, so flip it
+    // to keep looking the way the canopy was facing instead of snapping round.
+    this.yaw = d.yaw + Math.PI;
+    this.pitch = land ? 0.38 : 0.55;
+    this.distance = this.chunkSize * (land ? 0.85 : 1.7);
+    this.#updateCamera();
+    this.#updateFog();
+    this.#refreshChunks(true);
+    this.#updateStatus(true);
+    if (wasActive || land) this.onDescent?.({ type: land ? 'land' : 'stop', ...this.getDescent() });
+  }
+
+  toggleDescent(options) {
+    if (this.descent.active) this.stopDescent();
+    else this.startDescent(options);
+  }
+
+  #inDescentView(cx, cy, distance) {
+    if (!this.descent.active) return true;
+    // A forward cone plus a small all-round collar: turning the head inside
+    // the allowed yaw range can never expose an ungenerated chunk, but the
+    // ring behind the subject is not paid for.
+    if (distance < this.chunkSize * 1.8) return true;
+    const dx = (cx + 0.5) * this.chunkSize - this.descent.x;
+    const dz = (cy + 0.5) * this.chunkSize - this.descent.z;
+    const length = Math.hypot(dx, dz) || 1;
+    const dot = (dx * Math.sin(this.descent.baseYaw) + dz * Math.cos(this.descent.baseYaw)) / length;
+    return dot > 0.12;
+  }
+
+  #updateDescentCamera(dt) {
+    const d = this.descent;
+    if (!d.active) return;
+    d.time += dt;
+
+    const ground = this.#groundHeight(d.x, d.z);
+    d.groundY = ground;
+
+    const wander = valueNoise2(d.time * 0.035, 4.2, this.seed ^ 0x9e37);
+    d.windAngle = ((this.seed >>> 0) % 6283) / 1000 + (wander - 0.5) * 1.6;
+    d.windStrength = 7 + 9 * valueNoise2(d.time * 0.045, 9.1, this.seed ^ 0x51a7);
+    const windX = Math.cos(d.windAngle) * d.windStrength;
+    const windZ = Math.sin(d.windAngle) * d.windStrength;
+
+    const steer = d.input;
+    const accel = 18;
+    // Steering is relative to where the canopy is facing, so W always drifts
+    // towards the view and A/D strafe across it.
+    const forward = -steer.y;
+    const right = steer.x;
+    d.vx += (Math.sin(d.yaw) * forward + Math.cos(d.yaw) * right) * accel * dt;
+    d.vz += (Math.cos(d.yaw) * forward - Math.sin(d.yaw) * right) * accel * dt;
+    const drag = 1 - Math.exp(-dt * 0.85);
+    d.vx += (windX - d.vx) * drag * 0.6;
+    d.vz += (windZ - d.vz) * drag * 0.6;
+    const speed = Math.hypot(d.vx, d.vz);
+    const maxSpeed = 22;
+    if (speed > maxSpeed) {
+      d.vx *= maxSpeed / speed;
+      d.vz *= maxSpeed / speed;
+    }
+    d.x += d.vx * dt;
+    d.z += d.vz * dt;
+
+    const fall = 13 * (steer.dive ? 1.95 : 1) * (1 + Math.min(0.3, speed / 120));
+    d.altitude = Math.max(0, d.altitude - fall * dt);
+
+    this.target.set(d.x, ground, d.z);
+    this.yaw = d.yaw;
+
+    const eyeY = ground + d.altitude;
+    this.camera.position.set(d.x, eyeY, d.z);
+    const cp = Math.cos(d.pitch);
+    const lookDistance = 140;
+    this.camera.lookAt(
+      d.x + Math.sin(d.yaw) * cp * lookDistance,
+      eyeY + Math.sin(d.pitch) * lookDistance,
+      d.z + Math.cos(d.yaw) * cp * lookDistance,
+    );
+
+    if (d.altitude <= 0) {
+      d.altitude = 0;
+      this.stopDescent({ land: true });
+    }
+  }
 
   resize() {
     const width = this.canvas.clientWidth || this.canvas.parentElement?.clientWidth || 1;
@@ -980,6 +1307,18 @@ export class TerrainView3D {
       if (!previous) return;
       const current = { x: event.clientX, y: event.clientY };
       this.pointers.set(event.pointerId, current);
+
+      if (this.descent.active) {
+        if (this.pointers.size >= 2) return;
+        const d = this.descent;
+        d.yaw = clamp(
+          d.yaw - (current.x - previous.x) * 0.0032,
+          d.baseYaw - d.maxYaw,
+          d.baseYaw + d.maxYaw,
+        );
+        d.pitch = clamp(d.pitch - (current.y - previous.y) * 0.0026, -0.95, -0.12);
+        return;
+      }
 
       if (this.pointers.size >= 2) {
         const [a, b] = Array.from(this.pointers.values());
@@ -1019,6 +1358,7 @@ export class TerrainView3D {
 
     this.onWheel = (event) => {
       event.preventDefault();
+      if (this.descent.active) return;
       const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 400 : 1;
       if (event.shiftKey) {
         this.panTargetByPixels(-event.deltaX * unit * 0.35, -event.deltaY * unit * 0.35);
@@ -1055,10 +1395,15 @@ export class TerrainView3D {
     this.lastFrame = performance.now();
     const tick = (now) => {
       if (!this.running) return;
-      const dt = Math.max(0, (now - this.lastFrame) / 1000);
+      // Cap dt so a background tab or a long hitch cannot teleport the
+      // descent (or spin the wind model) forward by seconds at once.
+      const dt = Math.min(0.1, Math.max(0, (now - this.lastFrame) / 1000));
       this.lastFrame = now;
       if (dt > 0) this.fps = this.fps * 0.92 + (1 / dt) * 0.08;
-      this.#updateCamera();
+      if (this.descent.active) this.#updateDescentCamera(dt);
+      else this.#updateCamera();
+      this.#updateFog();
+      this.#updateClouds(dt);
       this.#refreshChunks();
       this._vegLodTick = (this._vegLodTick || 0) + 1;
       if (this._vegLodTick % 30 === 0) this.#updateVegetationLods();
@@ -1100,6 +1445,17 @@ export class TerrainView3D {
     this.water?.geometry.dispose();
     this.water?.material.dispose();
     this.water = null;
+
+    if (this.cloudGroup) {
+      for (const mesh of this.cloudGroup.children) {
+        mesh.geometry.dispose();
+        mesh.material.dispose();
+      }
+      this.cloudGroup.clear();
+      this.cloudGroup = null;
+    }
+    this.cloudTexture?.dispose();
+    this.cloudTexture = null;
 
     this.scene.traverse((object) => {
       if (object.geometry) object.geometry.dispose();

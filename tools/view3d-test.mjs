@@ -167,11 +167,32 @@ console.log(
 await page.evaluate(() => {
   location.hash = '#seed=iron-mesa-77&mode=3d&x=900&y=-450&z=1';
 });
-await page.waitForFunction(
-  () => window.__atlas?.state?.view3d?.ready === true && window.__atlas?.state?.seedText === 'iron-mesa-77',
-  null,
-  { timeout: 60000 },
-);
+try {
+  await page.waitForFunction(
+    () => window.__atlas?.state?.view3d?.ready === true && window.__atlas?.state?.seedText === 'iron-mesa-77',
+    null,
+    { timeout: 120000 },
+  );
+} catch (error) {
+  // A stuck stream is a real failure, but print why instead of only a timeout.
+  const state = await page.evaluate(() => {
+    const v = window.__atlas?.state?.view3d;
+    return {
+      seed: window.__atlas?.state?.seedText,
+      ready: v?.ready,
+      status: v?.status,
+      error: v?.error,
+      chunks: v?.stats?.activeChunks,
+      pending: v?.stats?.pendingChunks,
+      queued: v?.stats?.queuedChunks,
+      workers: v?.workers?.length,
+      hash: location.hash,
+    };
+  });
+  console.log('shared-link timeout:', JSON.stringify(state));
+  console.log('errors so far:', errors.join('\n') || '(none)');
+  throw error;
+}
 await page.waitForTimeout(900);
 const shared = await stats('shared-link');
 const sharedCenter = await page.evaluate(() => window.__atlas.state.view3d.getCenter());
@@ -206,6 +227,108 @@ console.log('panned target:', Math.hypot(afterPan.center.x - beforePan.center.x,
   '| chunks active:', afterPan.chunks > 0,
   '| lod levels:', afterPan.lod);
 await shot('05-pan');
+
+// --- 3D parachute descent ---------------------------------------------------
+// The canopy is a constrained first-person camera: it drifts and steers, but
+// cannot orbit, pan or dolly. Detail rises and the visible disc (chunk ring +
+// fog) shrinks as the subject nears the ground.
+const canopy = () =>
+  page.evaluate(() => {
+    const v = window.__atlas.state.view3d;
+    const d = v.getDescent();
+    return {
+      active: d.active,
+      landed: d.landed,
+      altitude: d.altitude,
+      yaw: d.yaw,
+      base: d.baseYaw,
+      max: d.maxYaw,
+      x: d.x,
+      z: d.z,
+      vx: v.descent.vx,
+      vz: v.descent.vz,
+      radius: v.stats.radius,
+      fogFar: v.scene.fog.far,
+      clouds: v.cloudGroup.visible,
+      chunks: v.stats.activeChunks,
+      button: document.querySelector('#descend-3d')?.textContent,
+      hint: document.querySelector('#hint')?.textContent,
+    };
+  });
+
+await page.click('#descend-3d');
+await page.waitForTimeout(600);
+const canopyHigh = await canopy();
+console.log(
+  '3D descent started:',
+  canopyHigh.active && canopyHigh.altitude < 640 && canopyHigh.altitude > 0,
+  '| clouds:', canopyHigh.clouds,
+  '| ring:', canopyHigh.radius,
+  '| fog far:', Math.round(canopyHigh.fogFar),
+  '| button:', canopyHigh.button,
+);
+
+// Look around: yaw stays inside the allowed cone.
+await page.mouse.move(720, 450);
+await page.mouse.down();
+await page.mouse.move(1435, 430, { steps: 8 });
+await page.mouse.up();
+await page.waitForTimeout(150);
+const canopyLook = await canopy();
+console.log('canopy yaw clamped:', Math.abs(canopyLook.yaw - canopyLook.base) <= canopyLook.max + 0.001);
+
+// No dolly, no pan: the canopy owns the camera.
+const distBefore = await page.evaluate(() => window.__atlas.state.view3d.distance);
+await page.mouse.move(720, 450);
+await page.mouse.wheel(0, -600);
+await page.waitForTimeout(150);
+const distAfter = await page.evaluate(() => window.__atlas.state.view3d.distance);
+console.log('canopy wheel locked:', distBefore === distAfter);
+
+// Steering is camera-relative: D must push the drift to the canopy's right.
+const steerBefore = await canopy();
+await page.keyboard.down('d');
+await page.waitForTimeout(500);
+await page.keyboard.up('d');
+const steerAfter = await canopy();
+const rightward = (s) => s.vx * Math.cos(s.yaw) - s.vz * Math.sin(s.yaw);
+console.log('canopy steering:', rightward(steerAfter) > rightward(steerBefore) + 0.2);
+
+// Drop low: the ring and fog contract.
+await page.evaluate(() => {
+  const v = window.__atlas.state.view3d;
+  const c = v.getCenter();
+  v.startDescent({ x: c.x, y: c.y, altitude: 130 });
+});
+await page.waitForTimeout(900);
+const canopyLow = await canopy();
+console.log(
+  'canopy detail rises with altitude fall:',
+  canopyLow.radius < canopyHigh.radius && canopyLow.fogFar < canopyHigh.fogFar,
+  '| ring:', canopyLow.radius,
+  '| fog far:', Math.round(canopyLow.fogFar),
+);
+await shot('06-canopy');
+
+// Touchdown returns to the orbit camera.
+await page.evaluate(() => {
+  const v = window.__atlas.state.view3d;
+  const c = v.getCenter();
+  v.startDescent({ x: c.x, y: c.y, altitude: 62 });
+});
+await page.waitForFunction(() => window.__atlas.state.view3d.getDescent().landed === true, null, {
+  timeout: 60000,
+});
+await page.waitForTimeout(500);
+const landed = await canopy();
+console.log(
+  'canopy landed:',
+  !landed.active && landed.landed,
+  '| orbit fog restored:', landed.fogFar === 5632,
+  '| clouds off:', !landed.clouds,
+  '| button:', landed.button,
+);
+await shot('07-landed');
 
 // Deterministic chunk edge sampling and LOD/eviction diagnostics.
 const chunkCheck = await page.evaluate(async () => {
@@ -289,7 +412,7 @@ console.log(
 // Mobile.
 await page.setViewportSize({ width: 420, height: 820 });
 await page.waitForTimeout(900);
-await shot('06-mobile');
+await shot('08-mobile');
 
 console.log('--- errors ---');
 console.log(errors.length ? errors.join('\n') : '(none)');

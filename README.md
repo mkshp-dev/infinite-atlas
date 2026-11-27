@@ -13,8 +13,11 @@ stand in during zoom transitions.
 
 A third **3D** view turns a bounded patch of the same world into a lit,
 fogged terrain mesh with Three.js. It reads the same elevation and moisture
-fields, so switching renderers never changes the landscape under a seed. The
-2D atlas remains the default experience and is untouched by the 3D renderer.
+fields, so switching renderers never changes the landscape under a seed. A
+canopy descent in 3D reuses the same altitude-driven idea: the camera is
+constrained to what the subject can see, and the visible disc, fog and
+vegetation detail all follow height. The 2D atlas remains the default
+experience and is untouched by the 3D renderer.
 
 The pre-descent free-roam release is tagged [`v1.0.0`](https://github.com/mkshp-dev/infinite-atlas/releases/tag/v1.0.0).
 
@@ -93,23 +96,40 @@ camera target as you pan.
   `InstancedMesh` per chunk and type. Instances carry per-tree scale, rotation,
   colour variation and a precomputed LOD mask, so the whole chunk is a handful
   of draw calls and no per-tree Three.js objects.
-- **Detail follows the camera.** Vegetation bands are keyed to the camera's
-  height above the ground: high up, only a fraction of instances are drawn and
-  the near band is wide; as the camera drops, the near band tightens and more
-  instances appear. Hysteresis prevents band flapping, and the camera is held
-  above the sampled terrain so it cannot slip inside a hill. This keeps the
-  visible instance budget roughly proportional to what the subject can resolve,
-  which is the same idea the parachute descent uses for the 2D tiles.
+- **Detail follows the camera.** Vegetation bands combine distance with the
+  camera's height above the ground. The full-detail band always covers at least
+  the chunk under the camera and grows slowly with height; chunks further out
+  draw a subset of their instances. As the camera drops, the visible disc
+  shrinks, so a larger share of it is drawn at full detail — detail rises where
+  the subject can actually resolve it. Hysteresis prevents band flapping, and
+  the camera is held above the sampled terrain so it cannot slip inside a hill.
 - **Bounded and disposable.** Chunk generation has bounded worker concurrency,
   stale-request ignoring, duplicate in-flight prevention, cache/eviction, and
   GPU geometry/material disposal. Leaving 3D mode tears down renderer, workers,
   terrain and vegetation resources.
 - **Diagnostics.** The HUD/status reports active chunks, pending work, triangle
   count, LOD mix, vegetation counts/batches, generation time, and FPS.
+- **Parachute descent.** Press `F` (or **descend from sky**) to fall through the
+  3D world. The camera becomes the subject's eye: it drifts on a seed-dependent
+  wind, `WASD`/arrows steer, `Shift` dives, and a drag looks around inside a
+  limited cone. Orbit, pan and dolly are disabled, so the view stays something
+  the canopy could actually see.
+- **Detail follows altitude.** The visible disc is tied to height: high up the
+  chunk ring is wide, fog sits far out and only a fraction of vegetation is
+  drawn; as the subject drops, the ring contracts, fog closes in and a larger
+  share of the visible disc is drawn at full vegetation detail. Chunks behind
+  the forward cone are not requested, and chunks left outside the shrinking ring
+  are disposed. Soft procedural cloud sheets mark the altitude bands and hide the
+  streaming edge, all generated from a small canvas texture (no downloads).
+- **Touchdown.** At 0 m the canopy lands and the view returns to the orbit
+  camera at ground level. Switching from the 2D descent into 3D keeps falling at
+  the same altitude instead of jumping into orbit.
 
 **Controls.** Drag to orbit, right-drag/shift-drag to pan the terrain target,
-scroll or pinch to dolly, double-click or `0` to reset the camera. `M` or `3`
-returns to the atlas and the seed box rebuilds the 3D world around the new seed.
+scroll or pinch to dolly, double-click or `0` to reset the camera. `F` starts or
+ends a canopy descent; while descending, drag looks around, `WASD` steers,
+`Shift` dives and wheel/pan are ignored. `M` or `3` returns to the atlas and the
+seed box rebuilds the 3D world around the new seed.
 
 ## Controls
 
@@ -147,12 +167,25 @@ returns to the atlas and the seed box rebuilds the 3D world around the new seed.
 | Input | Action |
 | --- | --- |
 | drag / one-finger drag | orbit around the patch |
+| right-drag / shift-drag | pan the terrain target |
 | scroll / pinch | dolly in and out |
 | double-click | reset the camera |
+| `F` | start / end the canopy descent |
 | `0` | reset the camera |
 | `M` | switch to atlas |
 | `3` | return to the atlas |
 | `R` | new random world and mesh |
+
+### 3D canopy descent
+
+| Input | Action |
+| --- | --- |
+| drag / one-finger drag | look around inside the canopy cone |
+| `W` `A` `S` `D` or arrow keys | steer the drift |
+| `Shift` | dive faster |
+| `F` | end the descent and return to orbit |
+| `M` | switch to atlas |
+| `0` | end the descent and reset the camera |
 
 Type any text in the seed box and press <kbd>Enter</kbd> to jump to that world.
 `copy link` puts the seed, mode, view and camera position in the URL hash
@@ -215,16 +248,17 @@ js/terrain.js       renderRegion and findStart (2D cartography)
 js/descent.js       parachute flight model and canopy/figure rendering
 js/tiles.js         worker pool, tile cache, request/peek/endFrame, eviction
 js/tile-worker.js   worker entry point: render one tile to an ImageBitmap
-js/view3d.js        Three.js scene, camera controls, water, lights and disposal
+js/view3d.js        Three.js scene, orbit/canopy cameras, water, clouds, disposal
 js/terrain3d-data.js  shared 3D grid sampler (typed arrays, no Three.js)
 js/terrain3d-worker.js  worker entry point: build and transfer the 3D grid
+js/vegetation.js    deterministic per-chunk vegetation sampling (no Three.js)
 js/app.js           camera, input, descent/atlas/3D modes, render loop, HUD, URL state
 vendor/three/       vendored Three.js module build (MIT)
 tools/preview.mjs   render PNG previews with Node (no browser)
 tools/screenshot.mjs  Playwright screenshots of the real app
 tools/test.mjs      end-to-end interaction/console-error test
 tools/descent-test.mjs  descent, canopy cam, landing and mode-toggle test
-tools/view3d-test.mjs  3D mesh, orbit, disposal, seed and reload test
+tools/view3d-test.mjs  3D mesh, orbit, canopy descent, disposal, seed and reload test
 tools/zoomcheck.mjs same view rendered at several zoom levels
 ```
 

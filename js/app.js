@@ -39,6 +39,7 @@ const viewSwitch = $('view-switch');
 const modeDescentBtn = $('mode-descent');
 const modeAtlasBtn = $('mode-atlas');
 const mode3dBtn = $('mode-3d');
+const descend3dBtn = $('descend-3d');
 const canvas3d = $('terrain3d');
 const viewThirdBtn = $('view-third');
 const viewFirstBtn = $('view-first');
@@ -216,7 +217,9 @@ const HINTS = {
   atlas:
     'drag to pan · scroll to zoom · <kbd>WASD</kbd> move · <kbd>R</kbd> new world · <kbd>0</kbd> reset · <kbd>3</kbd> 3D · <kbd>M</kbd> descent',
   three:
-    'drag to orbit · right-drag to pan · scroll to zoom · <kbd>M</kbd> or <kbd>3</kbd> atlas · <kbd>0</kbd> reset camera',
+    'drag to orbit · right-drag to pan · scroll to zoom · <kbd>F</kbd> descend · <kbd>M</kbd> or <kbd>3</kbd> atlas · <kbd>0</kbd> reset camera',
+  threeDescent:
+    'drag to look · <kbd>WASD</kbd> steer · <kbd>shift</kbd> dive · <kbd>F</kbd> land · <kbd>M</kbd> atlas · <kbd>0</kbd> reset',
 };
 
 function syncModeUi() {
@@ -241,9 +244,24 @@ function syncModeUi() {
   viewThirdBtn.setAttribute('aria-pressed', String(!first));
   viewFirstBtn.setAttribute('aria-pressed', String(first));
 
-  hintEl.innerHTML = is3d ? HINTS.three : descending ? HINTS.descent : HINTS.atlas;
+  const descent3d = is3d && Boolean(state.view3d?.getDescent?.().active);
+  hintEl.innerHTML = is3d
+    ? descent3d
+      ? HINTS.threeDescent
+      : HINTS.three
+    : descending
+      ? HINTS.descent
+      : HINTS.atlas;
+
+  descend3dBtn.hidden = !is3d;
+  descend3dBtn.classList.toggle('is-active', descent3d);
+  descend3dBtn.setAttribute('aria-pressed', String(descent3d));
+  descend3dBtn.textContent = descent3d ? 'stop descent' : 'descend from sky';
+
   $('reset').title = is3d
-    ? 'Return the 3D camera to the start (0)'
+    ? descent3d
+      ? 'End the descent and return to orbit (0)'
+      : 'Return the 3D camera to the start (0)'
     : descending
       ? 'Drop again from the start (0)'
       : 'Return to the starting view (0)';
@@ -266,6 +284,7 @@ async function enter3d() {
   if (state.view3d) {
     state.view3d.setWorld(state.seed, state.cam.x, state.cam.y);
     state.view3d.start();
+    applyPending3dDescent();
     return;
   }
 
@@ -293,7 +312,13 @@ async function enter3d() {
       onStatus: (status) => {
         state.view3dStatus = status;
       },
+      onDescent: (event) => {
+        if (event.type === 'land') toast('touchdown — 3D free roam');
+        syncModeUi();
+      },
     });
+    syncModeUi();
+    applyPending3dDescent();
   } catch (error) {
     console.error('Could not start the 3D view:', error);
     state.view3dStatus = 'error';
@@ -314,15 +339,32 @@ function leave3d() {
   state.view3dStatus = 'idle';
 }
 
+function toggle3dDescent() {
+  const view = state.view3d;
+  if (!view) return;
+  const descent = view.getDescent();
+  if (descent.active) {
+    view.stopDescent();
+    toast('3D free roam');
+  } else {
+    const center = view.getCenter();
+    view.startDescent({ x: center.x, y: center.y, altitude: START_ALTITUDE });
+    toast('descending in 3D');
+  }
+  syncModeUi();
+}
+
 function setMode(mode) {
   if (mode === state.mode) return;
 
   if (mode === '3d') {
     // Center the 3D patch on the subject, not on the mobile camera offset.
-    if (state.mode === 'descent') {
+    const fromDescent = state.mode === 'descent';
+    if (fromDescent) {
       state.cam.x = state.descent.x;
       state.cam.y = state.descent.y;
     }
+    pending3dDescent = fromDescent ? { altitude: scaleToAltitude(state.cam.scale) } : null;
     state.mode = '3d';
     syncModeUi();
     flash();
@@ -395,6 +437,8 @@ function applySeed(text) {
     setView(spot.x, spot.y, startScale());
   }
   engine?.configure({ seed: state.seed, options: state.options });
+  // A new seed resets the 3D view to orbit, so refresh the canopy controls.
+  syncModeUi();
 
   flash();
   updateHash(true);
@@ -420,7 +464,21 @@ function resetView() {
 
 // --- URL state --------------------------------------------------------------
 
+// When the person jumps from the 2D descent into 3D, keep falling instead of
+// dumping them into an orbit view. The view may still be lazy-loading, so the
+// request waits until it exists.
+let pending3dDescent = null;
+
+function applyPending3dDescent() {
+  if (!pending3dDescent || !state.view3d) return;
+  const { altitude } = pending3dDescent;
+  pending3dDescent = null;
+  state.view3d.startDescent({ x: state.cam.x, y: state.cam.y, altitude });
+  syncModeUi();
+}
+
 let lastHashAt = 0;
+let lastWrittenHash = location.hash;
 
 function updateHash(force = false) {
   const now = performance.now();
@@ -428,14 +486,27 @@ function updateHash(force = false) {
   lastHashAt = now;
 
   const next = new URLSearchParams();
+  const is3d = state.mode === '3d';
+  const viewCenter = is3d ? state.view3d?.getCenter() : null;
   next.set('seed', state.seedText);
   next.set('mode', state.mode);
   next.set('view', state.view);
-  next.set('x', (state.mode === 'descent' ? state.descent.x : state.cam.x).toFixed(1));
-  next.set('y', (state.mode === 'descent' ? state.descent.y : state.cam.y).toFixed(1));
-  next.set('z', (state.mode === '3d' ? 1 : state.cam.scale).toFixed(3));
+  next.set(
+    'x',
+    (is3d && viewCenter ? viewCenter.x : state.mode === 'descent' ? state.descent.x : state.cam.x).toFixed(1),
+  );
+  next.set(
+    'y',
+    (is3d && viewCenter ? viewCenter.y : state.mode === 'descent' ? state.descent.y : state.cam.y).toFixed(1),
+  );
+  next.set('z', (is3d ? 1 : state.cam.scale).toFixed(3));
   const hash = `#${next.toString()}`;
+  // A shared link pasted into the address bar changes location.hash before the
+  // hashchange event runs. Do not stomp on it with the state we are about to
+  // replace; let the handler apply it instead.
+  if (location.hash && location.hash !== lastWrittenHash && location.hash !== hash) return;
   if (location.hash !== hash) history.replaceState(null, '', hash);
+  lastWrittenHash = hash;
 }
 
 let toastTimer = 0;
@@ -580,6 +651,8 @@ window.addEventListener('keydown', (event) => {
     setMode(state.mode === 'atlas' ? 'descent' : 'atlas');
   } else if (key === '3') {
     setMode(state.mode === '3d' ? 'atlas' : '3d');
+  } else if (key === 'f') {
+    if (state.mode === '3d') toggle3dDescent();
   } else if (key === 'v') {
     if (state.mode === 'descent') setViewMode(state.view === 'first' ? 'third' : 'first');
   } else if (key === 'h') {
@@ -656,6 +729,9 @@ window.addEventListener('hashchange', () => {
     setView(spot.x, spot.y, startScale());
   }
 
+  // From here on the hash is ours again, so normal updates may rewrite it.
+  lastWrittenHash = location.hash;
+  syncModeUi();
   flash();
 });
 
@@ -678,6 +754,7 @@ $('reset').addEventListener('click', resetView);
 modeDescentBtn.addEventListener('click', () => setMode('descent'));
 modeAtlasBtn.addEventListener('click', () => setMode('atlas'));
 mode3dBtn.addEventListener('click', () => setMode('3d'));
+descend3dBtn.addEventListener('click', toggle3dDescent);
 viewThirdBtn.addEventListener('click', () => setViewMode('third'));
 viewFirstBtn.addEventListener('click', () => setViewMode('first'));
 syncModeUi();
@@ -837,8 +914,9 @@ function updateHud(now) {
     const view = state.view3d;
     const center = view?.getCenter() || { x: state.cam.x, y: state.cam.y };
     const stats = view?.stats;
+    const descent = view?.getDescent?.();
     posEl.textContent = `${formatNumber.format(center.x)}, ${formatNumber.format(center.y)}`;
-    altEl.textContent = '—';
+    altEl.textContent = descent?.active ? `${Math.round(descent.altitude)} m` : '—';
     scaleEl.textContent = '3D';
     scaleEl.title = stats
       ? `chunks ${stats.activeChunks} · pending ${stats.pendingChunks} · LOD ${stats.lodCounts.slice(0, 3).join('/')}`
@@ -859,9 +937,16 @@ function updateHud(now) {
       const vegTxt = veg
         ? ` · ${compact(veg.treeInstances)} trees · ${compact(veg.groundInstances)} ground`
         : '';
-      statusEl.textContent = pending > 0
-        ? `streaming ${stats.activeChunks} chunks · ${pending} pending${vegTxt}`
-        : `3D ready · ${stats?.activeChunks ?? 0} chunks · ${Math.round(view.generationMs)} ms${vegTxt}`;
+      if (descent?.active) {
+        statusEl.textContent =
+          `descending · ${Math.round(descent.altitude)} m · ${stats.activeChunks} chunks${vegTxt}`;
+      } else if (descent?.landed) {
+        statusEl.textContent = `landed · ${stats.activeChunks} chunks${vegTxt}`;
+      } else {
+        statusEl.textContent = pending > 0
+          ? `streaming ${stats.activeChunks} chunks · ${pending} pending${vegTxt}`
+          : `3D ready · ${stats?.activeChunks ?? 0} chunks · ${Math.round(view.generationMs)} ms${vegTxt}`;
+      }
       statusEl.title = veg
         ? `vegetation: ${veg.chunks} chunks · ${veg.batches} batches · ` +
           `${Math.round(veg.generationMs)} ms · ${veg.approxMemoryMB.toFixed(2)} MB · ` +
@@ -922,7 +1007,23 @@ function frame(now) {
   if (dt > 0) fps = fps * 0.92 + (1 / dt) * 0.08;
 
   if (state.mode === '3d') {
-    // The 3D view owns its own render loop and canvas.
+    // The 3D view owns its own render loop and canvas. Feed it the steering
+    // intent while a canopy descent is active.
+    const view = state.view3d;
+    if (view?.getDescent().active) {
+      let steerX = 0;
+      let steerY = 0;
+      if (heldKeys.has('a') || heldKeys.has('arrowleft')) steerX -= 1;
+      if (heldKeys.has('d') || heldKeys.has('arrowright')) steerX += 1;
+      if (heldKeys.has('w') || heldKeys.has('arrowup')) steerY -= 1;
+      if (heldKeys.has('s') || heldKeys.has('arrowdown')) steerY += 1;
+      const length = Math.hypot(steerX, steerY);
+      if (length > 0) {
+        steerX /= length;
+        steerY /= length;
+      }
+      view.setDescentInput({ x: steerX, y: steerY, dive: heldKeys.has('shift') });
+    }
   } else if (state.mode === 'descent') {
     const d = state.descent;
 
