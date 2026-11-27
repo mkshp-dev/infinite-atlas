@@ -855,11 +855,19 @@ function updateHud(now) {
     } else {
       const pending = stats?.pendingChunks ?? 0;
       const veg = stats?.vegetation;
-    const vegTxt = veg ? ` · ${veg.treeInstances} trees · ${veg.grassInstances} ground · ${veg.batches ?? 0} veg batches` : '';
-    statusEl.textContent = pending > 0
-      ? `streaming ${stats.activeChunks} chunks · ${pending} pending${vegTxt}`
-      : `3D ready · ${stats?.activeChunks ?? 0} chunks · ${Math.round(view.generationMs)} ms${vegTxt}`;
-    statusEl.classList.toggle('busy', pending > 0);
+      const compact = (n) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : `${n}`);
+      const vegTxt = veg
+        ? ` · ${compact(veg.treeInstances)} trees · ${compact(veg.groundInstances)} ground`
+        : '';
+      statusEl.textContent = pending > 0
+        ? `streaming ${stats.activeChunks} chunks · ${pending} pending${vegTxt}`
+        : `3D ready · ${stats?.activeChunks ?? 0} chunks · ${Math.round(view.generationMs)} ms${vegTxt}`;
+      statusEl.title = veg
+        ? `vegetation: ${veg.chunks} chunks · ${veg.batches} batches · ` +
+          `${Math.round(veg.generationMs)} ms · ${veg.approxMemoryMB.toFixed(2)} MB · ` +
+          `LOD near/mid/far ${veg.lodDist.join('/')}`
+        : '';
+      statusEl.classList.toggle('busy', pending > 0);
     }
 
     compassEl.style.transform = `rotate(${view ? view.getHeading() : 0}rad)`;

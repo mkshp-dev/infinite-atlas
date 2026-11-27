@@ -7,6 +7,7 @@
 import * as THREE from '../vendor/three/three.module.min.js';
 import { buildTerrainChunk, chunkKey, TERRAIN3D_DEFAULTS } from './terrain3d-data.js';
 import { buildVegetationChunk } from './vegetation.js';
+import { SEA_LEVEL, elevationAt } from './world.js';
 
 const SKY = 0xb9cbc6;
 const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
@@ -138,130 +139,105 @@ export class TerrainView3D {
 
   #setupVegetation() {
     this.vegGeometries = this.#createVegetationGeometries();
-    this.vegMaterials = this.#createVegetationMaterials();
-    this.vegetationStats = { treeInstances: 0, grassInstances: 0, chunks: 0, generationMs: 0 };
+    this.vegMaterial = new THREE.MeshLambertMaterial({ vertexColors: true });
+    this.vegetationStats = { treeInstances: 0, groundInstances: 0, chunks: 0, generationMs: 0, batches: 0, lodDist: [0, 0, 0], approxMemoryMB: 0 };
   }
 
   #createVegetationGeometries() {
-    // Simple low-poly archetypes; instanced per chunk.
-    const broadleaf = new THREE.Group();
-    {
-      const trunk = new THREE.CylinderGeometry(0.22, 0.32, 3.2, 6);
-      trunk.translate(0, 1.6, 0);
-      const canopy = new THREE.IcosahedronGeometry(1.55, 1);
-      canopy.translate(0, 3.9, 0);
-      broadleaf.add(new THREE.Mesh(trunk), new THREE.Mesh(canopy));
-    }
-    const tall = new THREE.Group();
-    {
-      const trunk = new THREE.CylinderGeometry(0.16, 0.28, 4.8, 6);
-      trunk.translate(0, 2.4, 0);
-      const c1 = new THREE.ConeGeometry(1.1, 2.8, 7);
-      c1.translate(0, 4.4, 0);
-      const c2 = new THREE.ConeGeometry(0.85, 2.2, 7);
-      c2.translate(0, 5.7, 0);
-      tall.add(new THREE.Mesh(trunk), new THREE.Mesh(c1), new THREE.Mesh(c2));
-    }
-    const tropical = new THREE.Group();
-    {
-      const trunk = new THREE.CylinderGeometry(0.18, 0.3, 4.2, 6);
-      trunk.translate(0, 2.1, 0);
-      const canopy = new THREE.SphereGeometry(1.8, 7, 6);
-      canopy.scale(1.2, 0.75, 1.2);
-      canopy.translate(0, 4.7, 0);
-      tropical.add(new THREE.Mesh(trunk), new THREE.Mesh(canopy));
-    }
-    const small = new THREE.Group();
-    {
-      const trunk = new THREE.CylinderGeometry(0.14, 0.22, 2.2, 5);
-      trunk.translate(0, 1.1, 0);
-      const canopy = new THREE.SphereGeometry(1.0, 7, 6);
-      canopy.translate(0, 2.6, 0);
-      small.add(new THREE.Mesh(trunk), new THREE.Mesh(canopy));
-    }
-    const shrub = new THREE.SphereGeometry(0.65, 6, 5);
-    shrub.scale(1.1, 0.8, 1.1);
-    shrub.translate(0, 0.45, 0);
-    const grass = new THREE.ConeGeometry(0.28, 0.9, 5);
-    grass.translate(0, 0.45, 0);
-
-    const toBuffer = (obj, mats) => {
-      // obj is Group of meshes or a geometry
-      if (obj.isBufferGeometry) return { geometry: obj, materialKey: mats };
-      const geoms = [];
-      obj.children.forEach((m, i) => {
-        const g = m.geometry.clone();
-        g.applyMatrix4(m.matrix);
-        g.userData.materialKey = mats[i] || mats[0];
-        geoms.push(g);
-      });
-      // merge by material key into two geometries (trunk/canopy) - simple approach: keep separate by returning array
-      return geoms;
+    // Low-poly archetypes sized in world metres. Parts are baked into one
+    // vertex-coloured geometry per archetype so each chunk needs one
+    // InstancedMesh per vegetation type instead of one per material part.
+    const tint = (geometry, hex) => {
+      const c = new THREE.Color(hex).convertSRGBToLinear();
+      const count = geometry.attributes.position.count;
+      const colors = new Float32Array(count * 3);
+      for (let i = 0; i < count; i++) {
+        colors[i * 3] = c.r;
+        colors[i * 3 + 1] = c.g;
+        colors[i * 3 + 2] = c.b;
+      }
+      geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+      return geometry;
     };
 
-    // Merge helpers
     const merge = (parts) => {
-      // parts: [{geometry, materialKey}]
-      const byKey = new Map();
-      for (const p of parts) {
-        const k = p.materialKey;
-        if (!byKey.has(k)) byKey.set(k, []);
-        byKey.get(k).push(p.geometry);
+      let vertexCount = 0;
+      let indexCount = 0;
+      for (const g of parts) {
+        vertexCount += g.attributes.position.count;
+        indexCount += g.index ? g.index.count : g.attributes.position.count;
       }
-      const out = [];
-      for (const [k, gs] of byKey) {
-        const merged = mergeGeometries(gs);
-        gs.forEach(g => g.dispose());
-        out.push({ geometry: merged, materialKey: k });
+      const pos = new Float32Array(vertexCount * 3);
+      const norm = new Float32Array(vertexCount * 3);
+      const col = new Float32Array(vertexCount * 3);
+      const idx = new Uint32Array(indexCount);
+      let vOff = 0;
+      let iOff = 0;
+      for (const g of parts) {
+        pos.set(g.attributes.position.array, vOff * 3);
+        norm.set(g.attributes.normal.array, vOff * 3);
+        col.set(g.attributes.color.array, vOff * 3);
+        const src = g.index ? g.index.array : null;
+        const n = g.index ? g.index.count : g.attributes.position.count;
+        for (let i = 0; i < n; i++) idx[iOff + i] = (src ? src[i] : i) + vOff;
+        vOff += g.attributes.position.count;
+        iOff += n;
       }
+      const out = new THREE.BufferGeometry();
+      out.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+      out.setAttribute('normal', new THREE.BufferAttribute(norm, 3));
+      out.setAttribute('color', new THREE.BufferAttribute(col, 3));
+      out.setIndex(new THREE.BufferAttribute(idx, 1));
+      out.computeBoundingSphere();
       return out;
     };
 
-    // local merge to avoid importing BufferGeometryUtils
-    function mergeGeometries(geoms) {
-      let posCount = 0, idxCount = 0;
-      for (const g of geoms) { posCount += g.attributes.position.count; idxCount += g.index ? g.index.count : g.attributes.position.count; }
-      const pos = new Float32Array(posCount * 3);
-      const norm = new Float32Array(posCount * 3);
-      const idx = new Uint32Array(idxCount);
-      let pOff = 0, iOff = 0, vOff = 0;
-      for (const g of geoms) {
-        const p = g.attributes.position.array;
-        const n = g.attributes.normal?.array;
-        pos.set(p, pOff * 3);
-        if (n) norm.set(n, pOff * 3);
-        const gi = g.index?.array;
-        const gc = g.index ? g.index.count : g.attributes.position.count;
-        for (let i = 0; i < gc; i++) idx[iOff + i] = (gi ? gi[i] : i) + pOff;
-        pOff += g.attributes.position.count;
-        iOff += gc;
-      }
-      const bg = new THREE.BufferGeometry();
-      bg.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-      bg.setAttribute('normal', new THREE.BufferAttribute(norm, 3));
-      bg.setIndex(new THREE.BufferAttribute(idx, 1));
-      return bg;
-    }
-
-    const treeParts = (group, keys) => merge(group.children.map((m,i)=>({geometry: (()=>{const g=m.geometry.clone(); g.applyMatrix4(m.matrix); return g;})(), materialKey: keys[i] || keys[0]})));
-    return {
-      broadleaf: treeParts(broadleaf, ['trunk','canopy']),
-      tall: treeParts(tall, ['trunk','canopy','canopy']),
-      tropical: treeParts(tropical, ['trunk','canopy']),
-      small: treeParts(small, ['trunk','canopy']),
-      shrub: [{ geometry: shrub, materialKey: 'shrub' }],
-      grass: [{ geometry: grass, materialKey: 'grass' }],
+    const trunk = (rTop, rBottom, height, segments = 6) => {
+      const g = new THREE.CylinderGeometry(rTop, rBottom, height, segments);
+      g.translate(0, height / 2, 0);
+      return g;
     };
-  }
 
-  #createVegetationMaterials() {
-    const mk = (color) => new THREE.MeshLambertMaterial({ color });
-    return {
-      trunk: mk(0x6a5138),
-      canopy: mk(0x4f7a3f),
-      shrub: mk(0x5f8447),
-      grass: mk(0x7b9852),
-    };
+    const broadleaf = merge([
+      tint(trunk(0.35, 0.55, 6.2), 0x7a6248),
+      tint((() => { const g = new THREE.IcosahedronGeometry(3.2, 1); g.translate(0, 8.2, 0); return g; })(), 0x6fa05a),
+    ]);
+
+    const tall = merge([
+      tint(trunk(0.28, 0.46, 9.2), 0x6b563e),
+      tint((() => { const g = new THREE.ConeGeometry(2.7, 6.2, 7); g.translate(0, 10.4, 0); return g; })(), 0x527f58),
+      tint((() => { const g = new THREE.ConeGeometry(2.0, 4.6, 7); g.translate(0, 14.0, 0); return g; })(), 0x5b8a5e),
+    ]);
+
+    const tropical = merge([
+      tint(trunk(0.32, 0.52, 8.0), 0x6b5334),
+      tint((() => {
+        const g = new THREE.SphereGeometry(3.6, 8, 6);
+        g.scale(1.25, 0.7, 1.25);
+        g.translate(0, 9.1, 0);
+        return g;
+      })(), 0x549a4a),
+    ]);
+
+    const small = merge([
+      tint(trunk(0.22, 0.36, 3.6, 5), 0x6a5138),
+      tint((() => { const g = new THREE.SphereGeometry(1.9, 7, 6); g.translate(0, 4.5, 0); return g; })(), 0x86a95e),
+    ]);
+
+    const shrub = tint((() => {
+      const g = new THREE.SphereGeometry(1.2, 6, 5);
+      g.scale(1.1, 0.8, 1.1);
+      g.translate(0, 0.9, 0);
+      return g;
+    })(), 0x74a05a);
+
+    const grass = tint((() => {
+      const g = new THREE.ConeGeometry(0.45, 1.2, 5);
+      g.translate(0, 0.6, 0);
+      return g;
+    })(), 0x93b064);
+
+    return { broadleaf, tall, tropical, small, shrub, grass };
   }
 
   // --- Chunk management -----------------------------------------------------
@@ -459,13 +435,29 @@ export class TerrainView3D {
     this.#recomputeBounds();
   }
 
+  // Chunks in front of the camera are worth more than chunks behind it. This
+  // is only a scheduling bias: every chunk in the ring is still generated, so
+  // turning the camera never reveals a hole.
+  #viewBias(cx, cy) {
+    const dx = (cx + 0.5) * this.chunkSize - this.target.x;
+    const dz = (cy + 0.5) * this.chunkSize - this.target.z;
+    const length = Math.hypot(dx, dz) || 1;
+    const forwardX = -Math.sin(this.yaw);
+    const forwardZ = -Math.cos(this.yaw);
+    const dot = (dx * forwardX + dz * forwardZ) / length;
+    return -dot * this.chunkSize * 0.75;
+  }
+
   #enqueue(req) {
     const job = {
       ...req,
       id: ++this.requestId,
       epoch: this.epoch,
       seed: this.seed,
-      priority: req.distance + req.lod * this.chunkSize * 0.5,
+      priority:
+        req.distance +
+        req.lod * this.chunkSize * 0.5 +
+        this.#viewBias(req.cx, req.cy),
     };
     this.inFlight.set(job.key, job);
     this.queue.push(job);
@@ -551,7 +543,19 @@ export class TerrainView3D {
     if (this.disposed || !message) return;
     if (message.error) {
       console.warn('Chunk worker error:', message.error);
-      this.inFlight.delete(message.key);
+      // Find the request by id (the worker does not know the cache key) and
+      // put it back so one bad chunk does not stall the stream.
+      for (const [key, job] of Array.from(this.inFlight.entries())) {
+        if (job.id !== message.id) continue;
+        job.attempts = (job.attempts || 0) + 1;
+        if (job.attempts > 2) {
+          this.inFlight.delete(key);
+        } else if (job.epoch === this.epoch && !this.queue.includes(job)) {
+          this.queue.push(job);
+        }
+        break;
+      }
+      this.queue.sort((a, b) => a.priority - b.priority);
       this.#pumpQueue();
       this.#updateStatus();
       return;
@@ -656,6 +660,7 @@ export class TerrainView3D {
     }
     this.chunks.delete(key);
     this.evictedChunks += 1;
+    this.#updateVegetationStats();
     this.#rebuildNeighborEdges(cx, cy);
   }
 
@@ -663,7 +668,7 @@ export class TerrainView3D {
     if (!chunk?.vegetation) return;
     for (const mesh of chunk.vegetation.meshes) {
       this.vegetationGroup.remove(mesh);
-      mesh.dispose();
+      mesh.dispose?.();
     }
     chunk.vegetation = null;
   }
@@ -673,55 +678,100 @@ export class TerrainView3D {
     if (!vegetationData?.instances) return;
     const meshes = [];
     let treeInstances = 0;
-    let grassInstances = 0;
+    let groundInstances = 0;
     const lodLevel = this.#vegetationLodForChunk(chunk);
+    const dummy = this._vegDummy || (this._vegDummy = new THREE.Object3D());
+    const color = this._vegColor || (this._vegColor = new THREE.Color());
+    const hasColor = THREE.InstancedMesh.prototype.setColorAt !== undefined;
+
     for (const [type, arr] of Object.entries(vegetationData.instances)) {
       const count = arr.length / 7;
       if (count === 0) continue;
-      const filtered = [];
+      const geometry = this.vegGeometries[type];
+      if (!geometry) continue;
+      let visible = 0;
       for (let i = 0; i < count; i++) {
-        const lodMask = arr[i * 7 + 6] || 0b111;
-        if (lodMask & (1 << lodLevel)) filtered.push(i);
+        if ((arr[i * 7 + 6] || 7) & (1 << lodLevel)) visible += 1;
       }
-      if (filtered.length === 0) continue;
-      const parts = this.vegGeometries[type];
-      if (!parts) continue;
-      for (const part of parts) {
-        const mat = this.vegMaterials[part.materialKey];
-        const mesh = new THREE.InstancedMesh(part.geometry, mat, filtered.length);
-        mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-        const dummy = new THREE.Object3D();
-        for (let j = 0; j < filtered.length; j++) {
-          const i = filtered[j];
-          const o = i * 7;
-          dummy.position.set(arr[o], arr[o + 1], arr[o + 2]);
-          dummy.rotation.set(0, arr[o + 4], 0);
-          const s = arr[o + 3];
-          dummy.scale.setScalar(s);
-          dummy.updateMatrix();
-          mesh.setMatrixAt(j, dummy.matrix);
+      if (visible === 0) continue;
+
+      const mesh = new THREE.InstancedMesh(geometry, this.vegMaterial, visible);
+      mesh.instanceMatrix.setUsage(THREE.StaticDrawUsage);
+      let j = 0;
+      for (let i = 0; i < count; i++) {
+        const o = i * 7;
+        if (!((arr[o + 6] || 7) & (1 << lodLevel))) continue;
+        const v = arr[o + 5] || 0;
+        dummy.position.set(arr[o], arr[o + 1], arr[o + 2]);
+        dummy.rotation.set(0, arr[o + 4], 0);
+        const s = arr[o + 3];
+        if (type === 'grass' || type === 'shrub') {
+          dummy.scale.set(s, s * (1 + v * 0.6), s);
+        } else {
+          // Slight per-tree height/width variation keeps a stand from looking
+          // like clones without another instance attribute.
+          dummy.scale.set(s * (1 - v * 0.35), s * (1 + v * 0.7), s * (1 - v * 0.35));
         }
-        mesh.instanceMatrix.needsUpdate = true;
-        mesh.frustumCulled = true;
-        mesh.userData.vegType = type;
-        mesh.userData.lodLevel = lodLevel;
-        this.vegetationGroup.add(mesh);
-        meshes.push(mesh);
+        dummy.updateMatrix();
+        mesh.setMatrixAt(j, dummy.matrix);
+        if (hasColor) {
+          color.setRGB(1 + v, 1 + v * 0.9, 1 + v * 0.7);
+          mesh.setColorAt(j, color);
+        }
+        j += 1;
       }
-      if (type === 'grass' || type === 'shrub') grassInstances += filtered.length;
-      else treeInstances += filtered.length;
+      mesh.instanceMatrix.needsUpdate = true;
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      mesh.computeBoundingSphere?.();
+      mesh.frustumCulled = true;
+      mesh.userData.vegType = type;
+      mesh.userData.lodLevel = lodLevel;
+      this.vegetationGroup.add(mesh);
+      meshes.push(mesh);
+      if (type === 'grass' || type === 'shrub') groundInstances += visible;
+      else treeInstances += visible;
     }
-    chunk.vegetation = { meshes, treeInstances, grassInstances, lodLevel, generationMs: vegetationData.generationMs || 0 };
+    chunk.vegetation = {
+      meshes,
+      treeInstances,
+      groundInstances,
+      lodLevel,
+      generationMs: vegetationData.generationMs || 0,
+    };
     this.#updateVegetationStats();
   }
 
+  // Detail bands are tied to how high the camera is, not just to the chunk
+  // grid: high above the ground you see a lot of terrain but little detail,
+  // and as the camera drops the near band tightens and more instances appear.
+  // Hysteresis keeps slow motion from flipping a chunk back and forth.
   #vegetationLodForChunk(chunk) {
     const centerX = (chunk.cx + 0.5) * this.chunkSize;
     const centerY = (chunk.cy + 0.5) * this.chunkSize;
     const d = Math.hypot(centerX - this.target.x, centerY - this.target.z);
-    if (d <= this.chunkSize * 2.2) return 0; // near
-    if (d <= this.chunkSize * 4.5) return 1; // mid
-    return 2; // far
+    const altitude = Math.max(this.chunkSize * 0.3, this.camera.position.y - this.target.y);
+    const near = altitude * 1.4;
+    const mid = altitude * 3.0;
+    const pad = altitude * 0.14;
+    const current = chunk.vegetation?.lodLevel;
+    if (current === 0) {
+      if (d > mid + pad) return 2;
+      if (d > near + pad) return 1;
+      return 0;
+    }
+    if (current === 1) {
+      if (d < near - pad) return 0;
+      if (d > mid + pad) return 2;
+      return 1;
+    }
+    if (current === 2) {
+      if (d < near - pad) return 0;
+      if (d < mid - pad) return 1;
+      return 2;
+    }
+    if (d <= near) return 0;
+    if (d <= mid) return 1;
+    return 2;
   }
 
   #updateVegetationLods() {
@@ -737,19 +787,32 @@ export class TerrainView3D {
   }
 
   #updateVegetationStats() {
-    let treeInstances = 0, grassInstances = 0, chunks = 0, generationMs = 0, batches = 0;
+    let treeInstances = 0;
+    let groundInstances = 0;
+    let chunks = 0;
+    let generationMs = 0;
+    let batches = 0;
     const lodDist = [0, 0, 0];
     for (const c of this.chunks.values()) {
       if (!c.vegetation) continue;
-      chunks++;
+      chunks += 1;
       treeInstances += c.vegetation.treeInstances;
-      grassInstances += c.vegetation.grassInstances;
+      groundInstances += c.vegetation.groundInstances;
       generationMs += c.vegetation.generationMs || 0;
       batches += c.vegetation.meshes.length;
-      lodDist[c.vegetation.lodLevel || 0] += c.vegetation.treeInstances + c.vegetation.grassInstances;
+      lodDist[c.vegetation.lodLevel || 0] += c.vegetation.treeInstances + c.vegetation.groundInstances;
     }
-    const approxMemoryMB = ((treeInstances + grassInstances) * 64) / (1024 * 1024); // rough instance matrix+overhead
-    this.vegetationStats = { treeInstances, grassInstances, chunks, generationMs, batches, lodDist, approxMemoryMB };
+    // 16 floats per instance matrix + 3 per instance colour, plus JS overhead.
+    const approxMemoryMB = ((treeInstances + groundInstances) * 76) / (1024 * 1024);
+    this.vegetationStats = {
+      treeInstances,
+      groundInstances,
+      chunks,
+      generationMs,
+      batches,
+      lodDist,
+      approxMemoryMB,
+    };
   }
 
   #evictIfNeeded(wanted) {
@@ -819,7 +882,7 @@ export class TerrainView3D {
       generationMs: this.lastGenerationMs,
       evictedChunks: this.evictedChunks,
       completedJobs: this.completedJobs,
-      vegetation: this.vegetationStats || { treeInstances: 0, grassInstances: 0, chunks: 0, generationMs: 0 },
+      vegetation: this.vegetationStats || { treeInstances: 0, groundInstances: 0, chunks: 0, generationMs: 0, batches: 0, lodDist: [0, 0, 0], approxMemoryMB: 0 },
     };
   }
 
@@ -849,12 +912,24 @@ export class TerrainView3D {
     this.#updateCamera();
   }
 
+  #groundHeight(x, z) {
+    return (elevationAt(x, z, this.seed, 6) - SEA_LEVEL) * this.heightScale;
+  }
+
   #updateCamera() {
+    // Keep the orbit centred on the ground and the camera above the surface.
+    // Without this the camera can slip inside a hill, which shows the skirt
+    // walls and makes near vegetation impossible to judge.
+    const targetGround = this.#groundHeight(this.target.x, this.target.z);
+    this.target.y += (targetGround - this.target.y) * 0.2;
+
     const cp = Math.cos(this.pitch);
     const sp = Math.sin(this.pitch);
     const x = this.target.x + this.distance * cp * Math.sin(this.yaw);
-    const y = this.target.y + this.distance * sp;
     const z = this.target.z + this.distance * cp * Math.cos(this.yaw);
+    let y = this.target.y + this.distance * sp;
+    const floor = this.#groundHeight(x, z) + Math.max(6, this.heightScale * 0.01);
+    if (y < floor) y = floor;
     this.camera.position.set(x, y, z);
     this.camera.lookAt(this.target);
   }
@@ -1018,8 +1093,10 @@ export class TerrainView3D {
     this.canvas.removeEventListener('contextmenu', this.onContextMenu);
 
     for (const key of Array.from(this.chunks.keys())) this.#disposeChunk(key);
-    for (const g of Object.values(this.vegGeometries || {})) for (const p of g) p.geometry.dispose();
-    for (const m of Object.values(this.vegMaterials || {})) m.dispose();
+    for (const geometry of Object.values(this.vegGeometries || {})) geometry.dispose();
+    this.vegGeometries = null;
+    this.vegMaterial?.dispose();
+    this.vegMaterial = null;
     this.water?.geometry.dispose();
     this.water?.material.dispose();
     this.water = null;

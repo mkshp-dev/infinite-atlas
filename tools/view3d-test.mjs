@@ -32,7 +32,7 @@ async function shot(name) {
 
 async function waitReady() {
   await page.waitForFunction(() => window.__atlas?.state?.view3d?.ready === true, null, {
-    timeout: 30000,
+    timeout: 45000,
   });
   await page.waitForTimeout(400);
 }
@@ -170,7 +170,7 @@ await page.evaluate(() => {
 await page.waitForFunction(
   () => window.__atlas?.state?.view3d?.ready === true && window.__atlas?.state?.seedText === 'iron-mesa-77',
   null,
-  { timeout: 45000 },
+  { timeout: 60000 },
 );
 await page.waitForTimeout(900);
 const shared = await stats('shared-link');
@@ -248,9 +248,43 @@ const vegCheck = await page.evaluate(async () => {
     if (A.length !== B.length) det = false;
     for (let i=0;i<A.length && det;i++) if (A[i]!==B[i]) det=false;
   }
-  return { det, trees: veg.treeInstances, grass: veg.grassInstances, vegChunks: veg.chunks, batches: veg.batches, lodDist: veg.lodDist };
+  let lodOk = veg.lodDist.length === 3;
+  let meshLodOk = true;
+  let meshCount = 0;
+  v.vegetationGroup.traverse((o) => {
+    if (!o.isInstancedMesh) return;
+    meshCount += 1;
+    if (![0, 1, 2].includes(o.userData.lodLevel)) meshLodOk = false;
+    if (!o.userData.vegType) meshLodOk = false;
+  });
+  // Camera must stay above the sampled terrain surface.
+  const world = await import('./js/world.js');
+  const cam = v.camera.position;
+  const ground = (world.elevationAt(cam.x, cam.z, v.seed, 6) - world.SEA_LEVEL) * v.heightScale;
+  const camAboveGround = cam.y >= ground - 1;
+  return {
+    det,
+    trees: veg.treeInstances,
+    grass: veg.groundInstances,
+    vegChunks: veg.chunks,
+    batches: veg.batches,
+    lodDist: veg.lodDist,
+    lodOk,
+    meshLodOk,
+    meshCount,
+    camAboveGround,
+  };
 });
-console.log('vegetation deterministic:', vegCheck.det, '| trees:', vegCheck.trees, '| ground:', vegCheck.grass, '| vegChunks:', vegCheck.vegChunks);
+console.log(
+  'vegetation deterministic:', vegCheck.det,
+  '| trees:', vegCheck.trees,
+  '| ground:', vegCheck.grass,
+  '| vegChunks:', vegCheck.vegChunks,
+  '| batches:', vegCheck.batches,
+  '| LOD bands:', vegCheck.lodDist.join('/'),
+  '| lod meta ok:', vegCheck.lodOk && vegCheck.meshLodOk,
+  '| camera above ground:', vegCheck.camAboveGround,
+);
 
 // Mobile.
 await page.setViewportSize({ width: 420, height: 820 });

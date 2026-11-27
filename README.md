@@ -82,10 +82,24 @@ camera target as you pan.
   typed arrays (positions, colours, indices, skirts, bounds) and returns
   transferable buffers. Three.js objects are created/disposed only on the main
   thread. A bounded main-thread fallback keeps it working without workers.
-- **Procedural vegetation.** Trees, shrubs and ground cover are placed
-  deterministically per terrain chunk from biome/elevation/moisture/slope rules.
-  Instances are rendered with `InstancedMesh`, use distance-based LOD/density
-  reduction, and are disposed/cached with their chunk lifecycle.
+- **Procedural vegetation.** `js/vegetation.js` places trees, shrubs and ground
+  cover per terrain chunk from the shared biome/elevation/moisture/slope fields.
+  Sampling is keyed by absolute world cell, so placement is deterministic for a
+  seed and independent of chunk order, camera, LOD or regeneration. Ocean,
+  shallows, snow, rock and steep slopes are excluded; woodland/jungle form
+  dense stands, meadows get scattered trees and grass, beaches stay sparse.
+- **Instanced, low-poly models.** Each archetype (broadleaf, tall, tropical,
+  small, shrub, grass) is one vertex-coloured geometry rendered with a single
+  `InstancedMesh` per chunk and type. Instances carry per-tree scale, rotation,
+  colour variation and a precomputed LOD mask, so the whole chunk is a handful
+  of draw calls and no per-tree Three.js objects.
+- **Detail follows the camera.** Vegetation bands are keyed to the camera's
+  height above the ground: high up, only a fraction of instances are drawn and
+  the near band is wide; as the camera drops, the near band tightens and more
+  instances appear. Hysteresis prevents band flapping, and the camera is held
+  above the sampled terrain so it cannot slip inside a hill. This keeps the
+  visible instance budget roughly proportional to what the subject can resolve,
+  which is the same idea the parachute descent uses for the 2D tiles.
 - **Bounded and disposable.** Chunk generation has bounded worker concurrency,
   stale-request ignoring, duplicate in-flight prevention, cache/eviction, and
   GPU geometry/material disposal. Leaving 3D mode tears down renderer, workers,
