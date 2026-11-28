@@ -19,6 +19,10 @@ constrained to what the subject can see, and the visible disc, fog and
 vegetation detail all follow height. The 2D atlas remains the default
 experience and is untouched by the 3D renderer.
 
+Both descents also have a procedural sound bed: wind that follows airspeed and
+altitude, canopy flutter, and a touchdown thump. It is synthesized with the Web
+Audio API, so there are still no downloaded assets.
+
 The pre-descent free-roam release is tagged [`v1.0.0`](https://github.com/mkshp-dev/infinite-atlas/releases/tag/v1.0.0).
 
 ## Run it
@@ -64,6 +68,10 @@ files appear on the next request.
 - **Touchdown.** At 0 m the canopy collapses and the status line offers the
   atlas. Press `M` (or the mode switch) to keep exploring on foot at ground
   level.
+- **Sound follows the fall.** A Web Audio wind bed rises with airspeed, deepens
+  with altitude and adds canopy flutter as the drift picks up. Touching down
+  plays a short fabric-and-ground thump. Audio starts on the first interaction
+  (browser autoplay rules) and can be muted with `U` or the **sound** button.
 
 ## The 3D view
 
@@ -123,7 +131,8 @@ camera target as you pan.
   streaming edge, all generated from a small canvas texture (no downloads).
 - **Touchdown.** At 0 m the canopy lands and the view returns to the orbit
   camera at ground level. Switching from the 2D descent into 3D keeps falling at
-  the same altitude instead of jumping into orbit.
+  the same altitude instead of jumping into orbit. The same procedural wind bed
+  follows the 3D fall, with a touchdown thump on landing.
 
 **Controls.** Drag to orbit, right-drag/shift-drag to pan the terrain target,
 scroll or pinch to dolly, double-click or `0` to reset the camera. `F` starts or
@@ -146,6 +155,7 @@ seed box rebuilds the 3D world around the new seed.
 | `R` | new random world and a fresh drop |
 | `0` | drop again from the start |
 | `H` / `C` / `G` | toggle relief / contours / grain |
+| `U` | mute / unmute the descent sound |
 
 ### Atlas
 
@@ -186,6 +196,7 @@ seed box rebuilds the 3D world around the new seed.
 | `F` | end the descent and return to orbit |
 | `M` | switch to atlas |
 | `0` | end the descent and reset the camera |
+| `U` | mute / unmute the descent sound |
 
 Type any text in the seed box and press <kbd>Enter</kbd> to jump to that world.
 `copy link` puts the seed, mode, view and camera position in the URL hash
@@ -231,6 +242,11 @@ ignored.
   and drag, maps altitude to camera scale, and draws either the parachutist or
   the canopy rim. `js/app.js` keeps the camera on the subject, so panning and
   zooming are not separate systems in this mode — they are the fall.
+- **Sound is synthesized, not loaded.** `js/audio.js` builds one looping pink
+  noise buffer, runs it through low-pass and band-pass filters, and drives gain
+  and filter frequency from airspeed, fall rate and altitude. A short filtered
+  burst plus a low sine thump plays on touchdown. The audio context is created
+  on the first user gesture, as browsers require.
 - **Start view.** On a fresh seed, `findStart()` samples a spiral of candidate
   locations. Atlas prefers a coastline; descent and 3D prefer a mostly-inland
   view with relief, so the canopy comes down over terrain rather than open
@@ -246,6 +262,7 @@ js/noise.js         hash, value noise, rotated-octave fBm, string hashing
 js/world.js         shared world API: elevation, moisture, biomes, palette
 js/terrain.js       renderRegion and findStart (2D cartography)
 js/descent.js       parachute flight model and canopy/figure rendering
+js/audio.js         procedural descent wind, canopy flutter and touchdown sound
 js/tiles.js         worker pool, tile cache, request/peek/endFrame, eviction
 js/tile-worker.js   worker entry point: render one tile to an ImageBitmap
 js/view3d.js        Three.js scene, orbit/canopy cameras, water, clouds, disposal
@@ -282,8 +299,9 @@ beaches, snow and grain).
 `heightScale`) for the mesh; `js/view3d.js` holds the camera limits, fog,
 lighting and orbit sensitivity. `js/descent.js` holds the feel of the drop:
 `START_ALTITUDE`, `FALL_RATE`, `MAX_SPEED` and `SCALE_PER_METRE` control the
-height, duration, drift and how far the camera tightens. `js/app.js` holds
-camera limits (`MIN_SCALE`, `MAX_SCALE`), worker count, cache size and the
+height, duration, drift and how far the camera tightens. `js/audio.js` holds the
+wind gains, filter ranges, flutter rate and touchdown envelope. `js/app.js`
+holds camera limits (`MIN_SCALE`, `MAX_SCALE`), worker count, cache size and the
 keyboard bindings.
 
 ## Development helpers
@@ -291,8 +309,8 @@ keyboard bindings.
 ```bash
 node tools/preview.mjs        # writes /tmp/atlas-{mid,far,close}.png
 node tools/test.mjs           # drives the 2D modes, prints stats, checks console errors
-node tools/descent-test.mjs   # checks the drop, canopy cam, landing and toggles
-node tools/view3d-test.mjs    # checks the mesh, orbit, disposal, seed changes and reload
+node tools/descent-test.mjs   # checks the drop, canopy cam, sound, landing and toggles
+node tools/view3d-test.mjs    # checks the mesh, orbit, 3D canopy audio, disposal, seed changes and reload
 node tools/screenshot.mjs     # writes /tmp/atlas-shots/*.png
 node tools/zoomcheck.mjs      # writes /tmp/atlas-zoom/z*.png
 ```

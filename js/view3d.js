@@ -70,6 +70,9 @@ export class TerrainView3D {
       maxYaw: 0.85,
       vx: 0,
       vz: 0,
+      speed: 0,
+      fallRate: 0,
+      dive: false,
       time: 0,
       windAngle: 0,
       windStrength: 8,
@@ -1224,6 +1227,9 @@ export class TerrainView3D {
       yaw: d.yaw,
       baseYaw: d.baseYaw,
       maxYaw: d.maxYaw,
+      speed: d.speed,
+      fallRate: d.fallRate,
+      dive: d.dive,
     };
   }
 
@@ -1255,6 +1261,9 @@ export class TerrainView3D {
     d.pitch = -0.55;
     d.vx = 0;
     d.vz = 0;
+    d.speed = 0;
+    d.fallRate = 0;
+    d.dive = false;
     d.time = 0;
     d.windAngle = ((this.seed >>> 0) % 6283) / 1000;
     d.windStrength = 8;
@@ -1334,10 +1343,13 @@ export class TerrainView3D {
       d.vx *= maxSpeed / speed;
       d.vz *= maxSpeed / speed;
     }
+    d.speed = Math.hypot(d.vx, d.vz);
+    d.dive = Boolean(steer.dive);
     d.x += d.vx * dt;
     d.z += d.vz * dt;
 
     const fall = 13 * (steer.dive ? 1.95 : 1) * (1 + Math.min(0.3, speed / 120));
+    d.fallRate = fall;
     d.altitude = Math.max(0, d.altitude - fall * dt);
 
     this.target.set(d.x, ground, d.z);

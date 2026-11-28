@@ -60,12 +60,47 @@ await page.waitForTimeout(600);
 await shot('01-descent');
 const initial = await stats('initial');
 
+// Browsers block audio before interaction; the context must not exist yet.
+const audioIdle = await page.evaluate(() => Boolean(window.__atlas.audio.ctx));
+console.log('audio waits for a gesture:', audioIdle === false);
+
 // Steer right for a second: position should move, altitude should keep falling.
 await page.keyboard.down('d');
 await page.waitForTimeout(1200);
 await page.keyboard.up('d');
 const steered = await stats('steered');
 console.log('steered right:', steered.x > initial.x, '| altitude fell:', steered.altitude < initial.altitude);
+
+// The procedural wind starts on the first gesture and follows the fall.
+const sound = await page.evaluate(() => {
+  const a = window.__atlas.audio;
+  return {
+    enabled: a.enabled,
+    context: Boolean(a.ctx),
+    state: a.ctx?.state ?? 'idle',
+    active: a.last.active,
+    intensity: a.intensity,
+    label: document.querySelector('#sound')?.textContent,
+  };
+});
+console.log(
+  'descent audio follows the fall:',
+  sound.context && sound.active && sound.intensity > 0,
+  '| state:',
+  sound.state,
+  '| label:',
+  sound.label,
+);
+await page.click('#sound');
+const muted = await page.evaluate(() => ({
+  enabled: window.__atlas.audio.enabled,
+  label: document.querySelector('#sound')?.textContent,
+  pressed: document.querySelector('#sound')?.getAttribute('aria-pressed'),
+}));
+console.log('sound muted:', muted.enabled === false && muted.label === 'sound off' && muted.pressed === 'false');
+await page.click('#sound');
+const unmuted = await page.evaluate(() => window.__atlas.audio.enabled);
+console.log('sound unmuted:', unmuted === true);
 
 // Dive with shift.
 await page.keyboard.down('Shift');

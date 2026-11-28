@@ -499,6 +499,10 @@ body:not(.is-descent) .stat-alt {
   text-underline-offset: 3px;
 }
 
+.text-btn.is-off {
+  color: rgba(152, 163, 164, 0.55);
+}
+
 /* Map furniture ----------------------------------------------------------- */
 
 .scale {

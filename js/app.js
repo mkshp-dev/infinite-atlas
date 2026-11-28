@@ -4,6 +4,7 @@
 import { TILE_SIZE, findStart } from './terrain.js';
 import { clamp, hashString } from './noise.js';
 import { TileEngine } from './tiles.js';
+import { DescentAudio } from './audio.js';
 import {
   Descent,
   START_ALTITUDE,
@@ -40,6 +41,7 @@ const modeDescentBtn = $('mode-descent');
 const modeAtlasBtn = $('mode-atlas');
 const mode3dBtn = $('mode-3d');
 const descend3dBtn = $('descend-3d');
+const soundBtn = $('sound');
 const canvas3d = $('terrain3d');
 const viewThirdBtn = $('view-third');
 const viewFirstBtn = $('view-first');
@@ -139,8 +141,12 @@ try {
 
 if (engine) engine.configure({ seed: state.seed, options: state.options });
 
+// Audio is procedural and starts on the first user gesture. It follows the
+// descent rather than the renderer, so it works in both 2D and 3D.
+const audio = new DescentAudio();
+
 // Handy for debugging from the console and for the screenshot harness.
-window.__atlas = { state, engine };
+window.__atlas = { state, engine, audio };
 
 seedInput.value = state.seedText;
 document.title = `Infinite Atlas — ${state.seedText}`;
@@ -275,6 +281,15 @@ function syncModeUi() {
   canvas3d.setAttribute('aria-label', '3D terrain of the procedural world');
 }
 
+function syncSoundUi() {
+  const on = audio.enabled;
+  soundBtn.hidden = !audio.supported;
+  soundBtn.textContent = on ? 'sound on' : 'sound off';
+  soundBtn.classList.toggle('is-off', !on);
+  soundBtn.setAttribute('aria-pressed', String(on));
+  soundBtn.title = on ? 'Mute descent sound (U)' : 'Enable descent sound (U)';
+}
+
 // The Three.js bundle is loaded only when the 3D view is first opened, so the
 // atlas and descent keep their fast start.
 let view3dPromise = null;
@@ -313,7 +328,10 @@ async function enter3d() {
         state.view3dStatus = status;
       },
       onDescent: (event) => {
-        if (event.type === 'land') toast('touchdown — 3D free roam');
+        if (event.type === 'land') {
+          toast('touchdown — 3D free roam');
+          audio.land();
+        }
         syncModeUi();
       },
     });
@@ -661,6 +679,9 @@ window.addEventListener('keydown', (event) => {
     $('opt-contours').click();
   } else if (key === 'g') {
     $('opt-grain').click();
+  } else if (key === 'u') {
+    audio.toggle();
+    syncSoundUi();
   } else if (key === 'shift') {
     heldKeys.add('shift');
   } else if (['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright', '+', '=', '-', '_'].includes(key)) {
@@ -750,6 +771,10 @@ seedInput.addEventListener('keydown', (event) => {
 $('new-seed').addEventListener('click', () => applySeed(randomSeed()));
 $('share').addEventListener('click', copyLink);
 $('reset').addEventListener('click', resetView);
+soundBtn.addEventListener('click', () => {
+  audio.toggle();
+  syncSoundUi();
+});
 
 modeDescentBtn.addEventListener('click', () => setMode('descent'));
 modeAtlasBtn.addEventListener('click', () => setMode('atlas'));
@@ -758,6 +783,7 @@ descend3dBtn.addEventListener('click', toggle3dDescent);
 viewThirdBtn.addEventListener('click', () => setViewMode('third'));
 viewFirstBtn.addEventListener('click', () => setViewMode('first'));
 syncModeUi();
+syncSoundUi();
 if (startMode === '3d') enter3d();
 
 for (const [id, option] of [
@@ -998,6 +1024,41 @@ function updateHud(now) {
 
 // --- Main loop --------------------------------------------------------------
 
+// Feed the audio engine from whichever descent is active. The 2D model and the
+// 3D canopy expose the same fall/airspeed information, so the wind follows the
+// subject rather than the renderer.
+function updateAudio() {
+  if (state.mode === '3d') {
+    const descent = state.view3d?.getDescent?.();
+    if (descent?.active) {
+      audio.update({
+        active: true,
+        altitude: descent.altitude,
+        fallRate: descent.fallRate ?? 0,
+        speed: descent.speed ?? Math.hypot(descent.vx || 0, descent.vz || 0),
+        dive: Boolean(descent.dive),
+      });
+    } else {
+      audio.update({ active: false });
+    }
+    return;
+  }
+
+  if (state.mode === 'descent' && !state.descent.landed) {
+    const d = state.descent;
+    audio.update({
+      active: true,
+      altitude: d.altitude,
+      fallRate: d.fallRate,
+      speed: Math.hypot(d.vx, d.vy),
+      dive: heldKeys.has('shift'),
+    });
+    return;
+  }
+
+  audio.update({ active: false });
+}
+
 let lastTime = performance.now();
 
 function frame(now) {
@@ -1005,6 +1066,7 @@ function frame(now) {
   lastTime = now;
 
   if (dt > 0) fps = fps * 0.92 + (1 / dt) * 0.08;
+  updateAudio();
 
   if (state.mode === '3d') {
     // The 3D view owns its own render loop and canvas. Feed it the steering
@@ -1053,7 +1115,10 @@ function frame(now) {
 
       const wasLanded = d.landed;
       d.update(dt, { x: steerX, y: steerY }, heldKeys.has('shift'));
-      if (d.landed && !wasLanded) toast('touchdown — press M for the atlas');
+      if (d.landed && !wasLanded) {
+        toast('touchdown — press M for the atlas');
+        audio.land();
+      }
       state.landed = d.landed;
     }
 

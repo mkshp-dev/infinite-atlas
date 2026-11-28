@@ -268,6 +268,31 @@ console.log(
   '| button:', canopyHigh.button,
 );
 
+const canopyAudio = await page.evaluate(() => {
+  const a = window.__atlas.audio;
+  const d = window.__atlas.state.view3d.getDescent();
+  return {
+    context: Boolean(a.ctx),
+    state: a.ctx?.state ?? 'idle',
+    active: a.last.active,
+    intensity: a.intensity,
+    fallRate: d.fallRate,
+    speed: d.speed,
+  };
+});
+console.log(
+  '3D canopy audio follows the fall:',
+  canopyAudio.context && canopyAudio.active && canopyAudio.intensity > 0,
+  '| state:',
+  canopyAudio.state,
+  '| fall:',
+  Math.round(canopyAudio.fallRate),
+  'm/s',
+  '| drift:',
+  Math.round(canopyAudio.speed),
+  'm/s',
+);
+
 // Look around: yaw stays inside the allowed cone.
 await page.mouse.move(720, 450);
 await page.mouse.down();
