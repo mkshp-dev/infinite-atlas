@@ -508,19 +508,33 @@ export class TerrainView3D {
     return null;
   }
 
-  #stitchedIndexArray(data) {
-    const seg = data.segments;
-    const n = seg + 1;
-    const idx = [];
-    const V = (i, j) => j * n + i;
+  #stitchFlags(data) {
     const N = this.#neighborLod(data.cx, data.cy - 1);
     const S = this.#neighborLod(data.cx, data.cy + 1);
     const W = this.#neighborLod(data.cx - 1, data.cy);
     const E = this.#neighborLod(data.cx + 1, data.cy);
-    const stitchN = N !== null && N === data.lod + 1;
-    const stitchS = S !== null && S === data.lod + 1;
-    const stitchW = W !== null && W === data.lod + 1;
-    const stitchE = E !== null && E === data.lod + 1;
+    // Only a coarser neighbour needs a fan: the finer side of a seam is
+    // responsible for matching the coarser edge.
+    return {
+      stitchN: N !== null && N === data.lod + 1,
+      stitchS: S !== null && S === data.lod + 1,
+      stitchW: W !== null && W === data.lod + 1,
+      stitchE: E !== null && E === data.lod + 1,
+    };
+  }
+
+  // Writes exactly segments*segments*2 triangles into `out`.
+  #writeStitchedIndices(data, flags, out) {
+    const seg = data.segments;
+    const n = seg + 1;
+    const { stitchN, stitchS, stitchW, stitchE } = flags;
+    const V = (i, j) => j * n + i;
+    let t = 0;
+    const put = (a, b, c) => {
+      out[t++] = a;
+      out[t++] = b;
+      out[t++] = c;
+    };
     // Interior full-resolution cells, excluding boundary strips that need stitching.
     const i0 = stitchW ? 1 : 0;
     const i1 = stitchE ? seg - 1 : seg;
@@ -529,10 +543,11 @@ export class TerrainView3D {
     for (let j = j0; j < j1; j++) {
       for (let i = i0; i < i1; i++) {
         const a = V(i, j), b = V(i + 1, j), c = V(i, j + 1), d = V(i + 1, j + 1);
-        idx.push(a, c, b, b, c, d);
+        put(a, c, b);
+        put(b, c, d);
       }
     }
-    // Edge stitching: coarser neighbor has one vertex per 2 fine segments.
+    // Edge stitching: coarser neighbour has one vertex per 2 fine segments.
     // North edge j==0, stitch against row 0/1 strip.
     if (stitchN) {
       for (let i = 0; i < seg; i += 2) {
@@ -540,7 +555,10 @@ export class TerrainView3D {
         const a = V(i, 0), m = V(i + 1, 0), b = V(i2, 0);
         const c = V(i, 1), d = V(i + 1, 1), e = V(i2, 1);
         // fan from coarse edge a,b on row 0 to fine row 1
-        idx.push(a, c, m, m, c, d, m, d, b, b, d, e);
+        put(a, c, m);
+        put(m, c, d);
+        put(m, d, b);
+        put(b, d, e);
       }
     }
     if (stitchS) {
@@ -549,7 +567,10 @@ export class TerrainView3D {
         const i2 = i + 2;
         const a = V(i, j), b = V(i + 1, j), c = V(i2, j);
         const d = V(i, j + 1), m = V(i + 1, j + 1), e = V(i2, j + 1);
-        idx.push(a, d, b, b, d, m, b, m, c, c, m, e);
+        put(a, d, b);
+        put(b, d, m);
+        put(b, m, c);
+        put(c, m, e);
       }
     }
     if (stitchW) {
@@ -559,7 +580,10 @@ export class TerrainView3D {
         const j2 = j + 2;
         const a = V(0, j), b = V(0, j + 1), c = V(0, j2);
         const d = V(1, j), e = V(1, j + 1), f = V(1, j2);
-        idx.push(a, b, d, b, e, d, b, c, e, c, f, e);
+        put(a, b, d);
+        put(b, e, d);
+        put(b, c, e);
+        put(c, f, e);
       }
     }
     if (stitchE) {
@@ -570,22 +594,69 @@ export class TerrainView3D {
         const j2 = j + 2;
         const a = V(i, j), b = V(i, j + 1), c = V(i, j2);
         const d = V(i + 1, j), e = V(i + 1, j + 1), f = V(i + 1, j2);
-        idx.push(a, b, d, d, b, e, b, c, e, e, c, f);
+        put(a, b, d);
+        put(d, b, e);
+        put(b, c, e);
+        put(e, c, f);
       }
     }
-    // Corners where stitched edge strips meet interior: fill remaining corner quads.
-    // The strip logic leaves corners at (0,0),(seg-1,0),(0,seg-1),(seg-1,seg-1) when both adjacent edges stitched.
-    // Handle by filling any unfilled boundary cells not covered above.
-    // Simpler: fill all 1x1 cells in boundary strips except those in stitched directions; stitched functions already cover their strips fully.
-    // For W stitch, we covered js..je rows, col 0-1 strip. N/S stitch covered full width row 0-1 / seg-1-seg. Overlap at corners: N+W corner cell (0,0)-(1,1) covered by N? N covers i=0..seg so includes i==0. Yes. So corners are fine.
-    return new Uint32Array(idx);
+    return t;
   }
 
   #rebuildChunkIndex(chunk) {
     if (!chunk?.sourceData) return;
-    const index = this.#stitchedIndexArray(chunk.sourceData);
-    chunk.mesh.geometry.setIndex(new THREE.BufferAttribute(index, 1));
-    chunk.mesh.geometry.computeVertexNormals();
+    const data = chunk.sourceData;
+    const seg = data.segments;
+    const n = seg + 1;
+    const flags = this.#stitchFlags(data);
+
+    const geometry = chunk.mesh.geometry;
+    const index = geometry.index.array;
+    const written = this.#writeStitchedIndices(data, flags, index);
+    if (written !== index.length) {
+      // Should be impossible for a power-of-two grid, but never leave stale
+      // indices pointing at vertex 0.
+      index.fill(0, written);
+    }
+    geometry.index.needsUpdate = true;
+
+    // The fine side of a seam keeps its full-resolution interior but its
+    // boundary vertices are pulled onto the coarse straight edge. Without
+    // this the two surfaces leave a T-junction sliver that shows the skirt.
+    const positions = chunk.renderPositions;
+    positions.set(data.positions);
+    const y = (i, j) => positions[(j * n + i) * 3 + 1];
+    if (flags.stitchN) {
+      for (let i = 1; i < seg; i += 2) positions[i * 3 + 1] = (y(i - 1, 0) + y(i + 1, 0)) * 0.5;
+    }
+    if (flags.stitchS) {
+      const row = seg * n;
+      for (let i = 1; i < seg; i += 2) positions[(row + i) * 3 + 1] = (y(i - 1, seg) + y(i + 1, seg)) * 0.5;
+    }
+    if (flags.stitchW) {
+      for (let j = 1; j < seg; j += 2) positions[j * n * 3 + 1] = (y(0, j - 1) + y(0, j + 1)) * 0.5;
+    }
+    if (flags.stitchE) {
+      for (let j = 1; j < seg; j += 2) positions[(j * n + seg) * 3 + 1] = (y(seg, j - 1) + y(seg, j + 1)) * 0.5;
+    }
+    geometry.getAttribute('position').needsUpdate = true;
+    geometry.computeVertexNormals();
+    geometry.computeBoundingSphere();
+
+    // Skirt tops must follow the snapped boundary too, otherwise the wall
+    // pokes up through the seam as a dark line.
+    if (chunk.skirt && chunk.renderSkirtPositions) {
+      const sp = chunk.renderSkirtPositions;
+      sp.set(data.skirtPositions);
+      const topY = (gi) => positions[gi * 3 + 1];
+      let k = 0;
+      for (let i = 0; i < n; i++, k++) sp[k * 6 + 1] = topY(i);
+      for (let j = 1; j < n; j++, k++) sp[k * 6 + 1] = topY(j * n + (n - 1));
+      for (let i = n - 2; i >= 0; i--, k++) sp[k * 6 + 1] = topY((n - 1) * n + i);
+      for (let j = n - 2; j >= 1; j--, k++) sp[k * 6 + 1] = topY(j * n);
+      chunk.skirt.geometry.getAttribute('position').needsUpdate = true;
+      chunk.skirt.geometry.computeVertexNormals();
+    }
     chunk.triangles = index.length / 3 + (chunk.skirt?.geometry.index?.count || 0);
   }
 
@@ -762,8 +833,12 @@ export class TerrainView3D {
       }
     }
 
+    // Rendering copies: the LOD seam snap rewrites boundary heights, while
+    // sourceData stays the pristine sampled grid so a later rebuild can start
+    // over. The index array is reused in place on every rebuild.
+    const renderPositions = new Float32Array(data.positions);
     const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.BufferAttribute(data.positions, 3));
+    geometry.setAttribute('position', new THREE.BufferAttribute(renderPositions, 3));
     geometry.setAttribute('color', new THREE.BufferAttribute(data.colors, 3));
     geometry.setIndex(new THREE.BufferAttribute(data.indices, 1));
     geometry.computeVertexNormals();
@@ -775,9 +850,11 @@ export class TerrainView3D {
     this.group.add(mesh);
 
     let skirt = null;
+    let renderSkirtPositions = null;
     if (data.skirtPositions && data.skirtIndices) {
+      renderSkirtPositions = new Float32Array(data.skirtPositions);
       const sg = new THREE.BufferGeometry();
-      sg.setAttribute('position', new THREE.BufferAttribute(data.skirtPositions, 3));
+      sg.setAttribute('position', new THREE.BufferAttribute(renderSkirtPositions, 3));
       sg.setAttribute('color', new THREE.BufferAttribute(data.skirtColors, 3));
       sg.setIndex(new THREE.BufferAttribute(data.skirtIndices, 1));
       sg.computeVertexNormals();
@@ -797,6 +874,8 @@ export class TerrainView3D {
       centerHeight: data.centerHeight,
       mesh,
       skirt,
+      renderPositions,
+      renderSkirtPositions,
       vegetation: null,
       vegetationData: data.vegetation || null,
       sourceData: data,

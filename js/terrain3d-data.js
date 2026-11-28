@@ -144,7 +144,6 @@ function buildSkirt({ positions, colors, segments, minHeight, skirtDepth }) {
   const skirtPositions = new Float32Array(count * 6);
   const skirtColors = new Float32Array(count * 6);
   const skirtIndices = new Uint32Array(count * 6);
-  const deep = [0.008, 0.035, 0.055];
 
   for (let k = 0; k < count; k++) {
     const source = ring[k] * 3;
@@ -159,9 +158,12 @@ function buildSkirt({ positions, colors, segments, minHeight, skirtDepth }) {
     skirtColors[o] = colors[source];
     skirtColors[o + 1] = colors[source + 1];
     skirtColors[o + 2] = colors[source + 2];
-    skirtColors[o + 3] = deep[0];
-    skirtColors[o + 4] = deep[1];
-    skirtColors[o + 5] = deep[2];
+    // The skirt is a fallback for missing neighbours and LOD cracks. Keep it a
+    // shadowed version of the edge colour instead of near-black so a visible
+    // wall reads as a cliff rather than a hole in the world.
+    skirtColors[o + 3] = colors[source] * 0.45 + 0.01;
+    skirtColors[o + 4] = colors[source + 1] * 0.45 + 0.015;
+    skirtColors[o + 5] = colors[source + 2] * 0.45 + 0.02;
   }
 
   for (let k = 0; k < count; k++) {

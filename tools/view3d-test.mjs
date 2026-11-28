@@ -354,9 +354,52 @@ const chunkCheck = await page.evaluate(async () => {
     }
     return true;
   })();
-  return { edgeMatch, active: stats.activeChunks, pending: stats.pendingChunks, lod: stats.lodCounts.slice(0,3), lodDiffOk };
+  // The fine side of every LOD seam must sit on the coarse straight edge,
+  // including the midpoints between coarse vertices, or the skirt shows
+  // through as a dark line.
+  const seamOk = (() => {
+    const byCoord = new Map();
+    for (const c of v.chunks.values()) byCoord.set(`${c.cx}:${c.cy}`, c);
+    const yAt = (c, i, j) => {
+      const n = c.sourceData.segments + 1;
+      return c.mesh.geometry.getAttribute('position').getY(j * n + i);
+    };
+    for (const c of v.chunks.values()) {
+      for (const [dx, dy, side] of [[1, 0, 'E'], [0, 1, 'S']]) {
+        const nb = byCoord.get(`${c.cx + dx}:${c.cy + dy}`);
+        if (!nb) continue;
+        const fine = c.sourceData.segments >= nb.sourceData.segments ? c : nb;
+        const coarse = fine === c ? nb : c;
+        if (fine.sourceData.segments === coarse.sourceData.segments) continue;
+        const ratio = fine.sourceData.segments / coarse.sourceData.segments;
+        const fineIsC = fine === c;
+        for (let k = 0; k <= fine.sourceData.segments; k++) {
+          const ck = k / ratio;
+          const k0 = Math.floor(ck);
+          const k1 = Math.min(coarse.sourceData.segments, k0 + 1);
+          const t = ck - k0;
+          let fy;
+          let cy;
+          if (side === 'E' || side === 'W') {
+            const fi = side === 'E' ? (fineIsC ? fine.sourceData.segments : 0) : (fineIsC ? 0 : fine.sourceData.segments);
+            const ci = side === 'E' ? (fineIsC ? 0 : coarse.sourceData.segments) : (fineIsC ? coarse.sourceData.segments : 0);
+            fy = yAt(fine, fi, k);
+            cy = yAt(coarse, ci, k0) * (1 - t) + yAt(coarse, ci, k1) * t;
+          } else {
+            const fj = side === 'S' ? (fineIsC ? fine.sourceData.segments : 0) : (fineIsC ? 0 : fine.sourceData.segments);
+            const cj = side === 'S' ? (fineIsC ? 0 : coarse.sourceData.segments) : (fineIsC ? coarse.sourceData.segments : 0);
+            fy = yAt(fine, k, fj);
+            cy = yAt(coarse, k0, cj) * (1 - t) + yAt(coarse, k1, cj) * t;
+          }
+          if (Math.abs(fy - cy) > 0.01) return false;
+        }
+      }
+    }
+    return true;
+  })();
+  return { edgeMatch, seamOk, active: stats.activeChunks, pending: stats.pendingChunks, lod: stats.lodCounts.slice(0,3), lodDiffOk };
 });
-console.log('chunk edges deterministic:', chunkCheck.edgeMatch, '| lod diff <=1:', chunkCheck.lodDiffOk, '| stats:', chunkCheck.active, chunkCheck.pending, chunkCheck.lod);
+console.log('chunk edges deterministic:', chunkCheck.edgeMatch, '| seam gap closed:', chunkCheck.seamOk, '| lod diff <=1:', chunkCheck.lodDiffOk, '| stats:', chunkCheck.active, chunkCheck.pending, chunkCheck.lod);
 
 const vegCheck = await page.evaluate(async () => {
   const v = window.__atlas.state.view3d;
